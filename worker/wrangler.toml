@@ -1,0 +1,10 @@
+name = "rollover-proxy"
+main = "api-proxy.js"
+compatibility_date = "2024-01-01"
+
+# Free plan — no account_id needed for first deploy (wrangler will prompt)
+# After first deploy, uncomment and set your account ID:
+# account_id = "YOUR_ACCOUNT_ID"
+
+[vars]
+ENVIRONMENT = "production"
