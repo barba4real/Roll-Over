@@ -1,0 +1,184 @@
+/**
+ * OpenLigaDB API client
+ * Completely free, no key required, unlimited requests
+ * Base URL: https://api.openligadb.de
+ * Covers: Bundesliga, 2. Bundesliga, DFB-Pokal, Champions League, and more
+ *
+ * Endpoints:
+ *   /getmatchdata/{league}/{season}/{matchday}
+ *   /getmatchdata/{league}/{season}
+ *   /getavailableleagues
+ *   /getbltable/{league}/{season}
+ *
+ * League shortcuts: bl1 (Bundesliga), bl2 (2. Bundesliga), dfb (DFB-Pokal), cl (CL)
+ */
+
+import { httpGet } from '../lib/http';
+
+const API_HOST = 'https://api.openligadb.de';
+
+// Available leagues on OpenLigaDB
+export const OPENLIGA_LEAGUES = [
+  { shortcut: 'bl1', name: 'Bundesliga', country: 'Germany' },
+  { shortcut: 'bl2', name: '2. Bundesliga', country: 'Germany' },
+  { shortcut: 'bl3', name: '3. Liga', country: 'Germany' },
+  { shortcut: 'dfb', name: 'DFB-Pokal', country: 'Germany' },
+  { shortcut: 'ucl', name: 'Champions League', country: 'Europe' },
+  { shortcut: 'uel', name: 'Europa League', country: 'Europe' },
+];
+
+async function apiFetch(endpoint: string): Promise<any> {
+  const url = `${API_HOST}${endpoint}`;
+  try {
+    const result: any = await httpGet(url, { 'Accept': 'application/json' });
+    return result;
+  } catch (e) {
+    console.error(`OpenLigaDB fetch failed: ${endpoint}`, e);
+    return null;
+  }
+}
+
+function getCurrentSeason(): number {
+  const now = new Date();
+  return now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1;
+}
+
+/**
+ * Get all matches for a league in the current season
+ */
+export async function getSeasonMatches(leagueShortcut: string): Promise<OpenLigaMatch[]> {
+  const season = getCurrentSeason();
+  const data = await apiFetch(`/getmatchdata/${leagueShortcut}/${season}`);
+  if (!Array.isArray(data)) return [];
+  return data.map(parseMatch).filter((m): m is OpenLigaMatch => m !== null);
+}
+
+/**
+ * Get upcoming (not yet played) matches for a league
+ */
+export async function getUpcomingMatches(leagueShortcut: string, days: number = 7): Promise<OpenLigaMatch[]> {
+  const allMatches = await getSeasonMatches(leagueShortcut);
+  const now = Date.now();
+  const cutoff = now + days * 24 * 60 * 60 * 1000;
+
+  return allMatches.filter(m => {
+    const kickOff = new Date(m.kickOff).getTime();
+    return kickOff >= now && kickOff <= cutoff && !m.isFinished;
+  });
+}
+
+/**
+ * Get all upcoming matches across all OpenLigaDB leagues
+ */
+export async function getAllUpcomingEvents(days: number = 7): Promise<OpenLigaMatch[]> {
+  const results = await Promise.allSettled(
+    OPENLIGA_LEAGUES.map(league => getUpcomingMatches(league.shortcut, days))
+  );
+
+  const allMatches: OpenLigaMatch[] = [];
+  for (const result of results) {
+    if (result.status === 'fulfilled') {
+      allMatches.push(...result.value);
+    }
+  }
+
+  // Sort by kickoff
+  allMatches.sort((a, b) => new Date(a.kickOff).getTime() - new Date(b.kickOff).getTime());
+  return allMatches;
+}
+
+/**
+ * Get league table (standings)
+ */
+export async function getStandings(leagueShortcut: string): Promise<OpenLigaStanding[]> {
+  const season = getCurrentSeason();
+  const data = await apiFetch(`/getbltable/${leagueShortcut}/${season}`);
+  if (!Array.isArray(data)) return [];
+
+  return data.map((entry: any, idx: number) => ({
+    position: idx + 1,
+    teamName: entry.teamName || entry.shortName || '',
+    teamId: entry.teamInfoId || 0,
+    points: entry.points || 0,
+    played: entry.matches || 0,
+    wins: entry.won || 0,
+    draws: entry.draw || 0,
+    losses: entry.lost || 0,
+    goalsFor: entry.goals || 0,
+    goalsAgainst: entry.opponentGoals || 0,
+    goalDiff: entry.goalDiff || 0,
+  }));
+}
+
+/**
+ * Get recent results (last matchday) for a league
+ */
+export async function getLastResults(leagueShortcut: string): Promise<OpenLigaMatch[]> {
+  const season = getCurrentSeason();
+  const data = await apiFetch(`/getmatchdata/${leagueShortcut}/${season}`);
+  if (!Array.isArray(data)) return [];
+
+  // Filter to finished matches, take last 15
+  return data
+    .map(parseMatch)
+    .filter((m): m is OpenLigaMatch => m !== null && m.isFinished)
+    .slice(-15);
+}
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+export interface OpenLigaMatch {
+  id: number;
+  homeTeam: string;
+  awayTeam: string;
+  homeTeamId: number;
+  awayTeamId: number;
+  kickOff: string; // ISO date
+  league: string;
+  leagueShortcut: string;
+  matchday: number;
+  isFinished: boolean;
+  homeScore: number | null;
+  awayScore: number | null;
+}
+
+export interface OpenLigaStanding {
+  position: number;
+  teamName: string;
+  teamId: number;
+  points: number;
+  played: number;
+  wins: number;
+  draws: number;
+  losses: number;
+  goalsFor: number;
+  goalsAgainst: number;
+  goalDiff: number;
+}
+
+// ─── Parsers ─────────────────────────────────────────────────────────────────
+
+function parseMatch(raw: any): OpenLigaMatch | null {
+  const team1 = raw.team1;
+  const team2 = raw.team2;
+  if (!team1 || !team2) return null;
+
+  // Get final result (last entry in matchResults array)
+  const results = raw.matchResults || [];
+  const finalResult = results.find((r: any) => r.resultTypeID === 2) || results[results.length - 1];
+
+  return {
+    id: raw.matchID || 0,
+    homeTeam: team1.teamName || team1.shortName || '',
+    awayTeam: team2.teamName || team2.shortName || '',
+    homeTeamId: team1.teamId || 0,
+    awayTeamId: team2.teamId || 0,
+    kickOff: raw.matchDateTimeUTC || raw.matchDateTime || '',
+    league: raw.leagueName || OPENLIGA_LEAGUES.find(l => l.shortcut === raw.leagueShortcut)?.name || '',
+    leagueShortcut: raw.leagueShortcut || '',
+    matchday: raw.group?.groupOrderID || 0,
+    isFinished: raw.matchIsFinished || false,
+    homeScore: finalResult?.pointsTeam1 ?? null,
+    awayScore: finalResult?.pointsTeam2 ?? null,
+  };
+}

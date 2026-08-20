@@ -1,0 +1,22 @@
+{
+  "identifier": "default",
+  "description": "enables the default permissions",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "sql:default",
+    "sql:allow-execute",
+    "sql:allow-select",
+    "sql:allow-close",
+    "http:default",
+    {
+      "identifier": "http:allow-fetch",
+      "allow": [
+        { "url": "https://api.football-data.org/**" },
+        { "url": "https://v3.football.api-sports.io/**" },
+        { "url": "https://api.odds-api.io/**" },
+        { "url": "https://api.the-odds-api.com/**" }
+      ]
+    }
+  ]
+}
