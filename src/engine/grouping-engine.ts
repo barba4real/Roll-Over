@@ -37,6 +37,7 @@ export const DEFAULT_CONFIG: GroupingConfig = {
   maxSlipsToGenerate: 50,
   futureOnly: true, // By default only build with fixtures that haven't kicked off
   coverageMode: true, // Exhaust the whole pool before any fixture repeats
+  autoCapSlips: true, // Cap slips to the zero-repeat max (each fixture used once)
 };
 
 /**
@@ -461,125 +462,167 @@ export async function generateSlipsAsync(
 
   await new Promise(r => setTimeout(r, 0));
 
-  // Large candidate pool — need many options so coverage selection has room
-  const candidatePool = beamSearch(
-    eligible,
-    config,
-    scores,
-    400,
-    Math.max(config.maxSlipsToGenerate * 8, 200)
-  );
+  if (config.coverageMode) {
+    // TRUE PARTITION PACKING — the core rollover risk-spreading algorithm.
+    // Each pick is consumed from a pool and placed into exactly ONE slip before
+    // any pick is reused. A single losing pick can therefore only ever kill ONE
+    // slip in the first full pass over the pool.
+    const slips = packIntoSlips(eligible, config, scores, onProgress);
+    onProgress?.(slips.length);
+    return slips;
+  }
 
+  // Non-coverage: beam-search candidate pool + legacy repeat allowance
+  const candidatePool = beamSearch(
+    eligible, config, scores, 400, Math.max(config.maxSlipsToGenerate * 8, 200)
+  );
   if (candidatePool.length === 0) return [];
 
-  onProgress?.(0);
-  await new Promise(r => setTimeout(r, 0));
-
   const scored = hasMeaningfulScores(eligible, scores);
-
   const chosen: ParsedSelection[][] = [];
   const chosenKeys = new Set<string>();
-  const usage = new Map<string, number>(); // fixture-key → times used across chosen slips
-
-  // Use fixture identity (teams), NOT selection id, so different picks on the SAME
-  // match count as the same fixture for coverage purposes.
+  const usage = new Map<string, number>();
   const fixtureKey = (s: ParsedSelection) => `${s.homeTeam.toLowerCase()}|${s.awayTeam.toLowerCase()}`;
 
-  function slipCost(picks: ParsedSelection[]): number {
-    // Total current usage of this slip's fixtures. Lower = uses fresher fixtures.
-    return picks.reduce((sum, s) => sum + (usage.get(fixtureKey(s)) || 0), 0);
+  for (let allowance = config.maxRepeatAcrossSlips; allowance <= config.maxSlipsToGenerate; allowance++) {
+    for (const picks of candidatePool) {
+      if (chosen.length >= config.maxSlipsToGenerate) break;
+      const key = picks.map(s => s.id).sort().join('|');
+      if (chosenKeys.has(key)) continue;
+      const wouldExceed = picks.some(s => (usage.get(fixtureKey(s)) || 0) >= allowance);
+      if (wouldExceed) continue;
+      chosen.push(picks);
+      chosenKeys.add(key);
+      for (const s of picks) usage.set(fixtureKey(s), (usage.get(fixtureKey(s)) || 0) + 1);
+    }
+    onProgress?.(chosen.length);
+    await new Promise(r => setTimeout(r, 0));
+    if (chosen.length >= config.maxSlipsToGenerate) break;
+    if (chosen.length >= candidatePool.length) break;
   }
-  function slipMaxUsage(picks: ParsedSelection[]): number {
-    return Math.max(...picks.map(s => usage.get(fixtureKey(s)) || 0));
+
+  const slips = chosen.map(picks => buildSlip(picks, config, scores));
+  if (scored) {
+    slips.sort((a, b) => b.qualityScore - a.qualityScore);
+  } else {
+    slips.sort((a, b) => {
+      const distA = Math.abs(a.accumulatedOdds - config.targetOdds);
+      const distB = Math.abs(b.accumulatedOdds - config.targetOdds);
+      if (Math.abs(distA - distB) > 0.001) return distA - distB;
+      return a.selectionCount - b.selectionCount;
+    });
   }
+  return slips;
+}
 
-  if (config.coverageMode) {
-    // Coverage-driven greedy selection
-    while (chosen.length < config.maxSlipsToGenerate) {
-      // Among unused candidate slips, find the one with the lowest fixture usage.
-      // This guarantees unused fixtures are consumed before any repeat.
-      let best: ParsedSelection[] | null = null;
-      let bestCost = Infinity;
-      let bestMax = Infinity;
-      let bestOddsDist = Infinity;
+/**
+ * PARTITION PACKER — split the pick pool into slips, using each pick ONCE before
+ * any reuse. This is what makes a single losing pick affect only one slip.
+ *
+ * Algorithm (round-based):
+ *   Round 1: repeatedly take the still-unused pick with the earliest kickoff
+ *   (or highest confidence, if scored) as a slip seed, then greedily add more
+ *   UNUSED picks that don't conflict until the slip's odds reach the target
+ *   window. Mark all used. Continue until unused picks can't form a full slip.
+ *   Round 2+: only begins when round 1 is exhausted, reusing least-used picks.
+ *
+ * Guarantees for the classic case (28 picks, target 3.0 ≈ 3 picks/slip):
+ *   ~9 slips, each pick in exactly one slip → one loser kills exactly one slip.
+ */
+function packIntoSlips(
+  eligible: ParsedSelection[],
+  config: GroupingConfig,
+  scores: Map<string, number> | undefined,
+  onProgress?: (found: number) => void
+): Slip[] {
+  const scored = hasMeaningfulScores(eligible, scores);
+  const fixtureKey = (s: ParsedSelection) => `${s.homeTeam.toLowerCase()}|${s.awayTeam.toLowerCase()}`;
+  const targetMin = config.oddsRange.min;
+  const targetMax = config.oddsRange.max;
 
-      for (const picks of candidatePool) {
-        const key = picks.map(s => s.id).sort().join('|');
-        if (chosenKeys.has(key)) continue;
+  const slips: Slip[] = [];
+  const globalSlipKeys = new Set<string>(); // dedupe identical slips across rounds
 
-        const cost = slipCost(picks);
-        const maxU = slipMaxUsage(picks);
-        const odds = picks.reduce((acc, s) => acc * s.odds, 1);
-        const oddsDist = Math.abs(odds - config.targetOdds);
+  // How many full passes over the pool are allowed.
+  //  - autoCapSlips ON  → exactly ONE pass: every fixture used once, no repeats.
+  //    The slip count is whatever one clean pass yields (ignores maxSlipsToGenerate).
+  //  - autoCapSlips OFF → allow repeat rounds up to maxSlipsToGenerate, each round
+  //    rotating order so slips differ; max repeat grows by 1 per pass, never clusters.
+  const maxRounds = config.autoCapSlips ? 1 : Math.max(1, config.maxSlipsToGenerate);
+  // Effective slip cap: when auto-capping, let the single clean pass run to
+  // completion (no numeric ceiling); otherwise honour the user's requested max.
+  const slipCap = config.autoCapSlips ? Number.POSITIVE_INFINITY : config.maxSlipsToGenerate;
 
-        // Prefer: lowest max-usage (keeps repeats even), then lowest total cost,
-        // then closest to target odds. This makes the least-used fixtures champion
-        // the next set exactly as required.
-        if (
-          maxU < bestMax ||
-          (maxU === bestMax && cost < bestCost) ||
-          (maxU === bestMax && cost === bestCost && oddsDist < bestOddsDist)
-        ) {
-          best = picks;
-          bestMax = maxU;
-          bestCost = cost;
-          bestOddsDist = oddsDist;
+  for (let round = 0; round < maxRounds; round++) {
+    if (slips.length >= slipCap) break;
+
+    // Fresh pool for THIS round — every eligible pick, each usable once here.
+    // Rotate the seed order per round so repeat rounds don't reproduce the same
+    // slips: round 0 keeps natural order, round 1 shifts by one, etc.
+    let pool = [...eligible].sort((a, b) => {
+      if (scored) return (scores!.get(b.id) ?? 50) - (scores!.get(a.id) ?? 50);
+      return a.index - b.index;
+    });
+    if (round > 0) {
+      const shift = round % pool.length;
+      pool = [...pool.slice(shift), ...pool.slice(0, shift)];
+    }
+
+    const usedThisRound = new Set<string>();
+    let madeSlipThisRound = false;
+
+    // Consume the round pool into slips. Each slip takes fresh (round-unused)
+    // picks, fills toward the target odds window, then the next slip starts.
+    while (slips.length < slipCap) {
+      const slip: ParsedSelection[] = [];
+      let odds = 1;
+
+      for (const cand of pool) {
+        if (slip.length >= config.maxPicksPerSlip) break;
+        const fk = fixtureKey(cand);
+        if (usedThisRound.has(fk)) continue;
+
+        const newOdds = odds * cand.odds;
+        // Don't overshoot the max. If a single pick alone would exceed max, and
+        // the slip is still empty, allow it (a lone strong favourite can be a slip).
+        if (newOdds > targetMax && slip.length > 0) continue;
+        if (conflictsWithGroup(cand, slip, config)) continue;
+
+        slip.push(cand);
+        odds = newOdds;
+
+        // Stop this slip once inside the target window
+        if (slip.length >= config.minPicksPerSlip && odds >= targetMin) break;
+      }
+
+      // Mark picks used this round regardless (they've been consumed)
+      for (const s of slip) usedThisRound.add(fixtureKey(s));
+
+      const valid =
+        slip.length >= config.minPicksPerSlip &&
+        odds >= targetMin &&
+        odds <= targetMax;
+
+      if (valid) {
+        const key = slip.map(s => s.id).sort().join('|');
+        if (!globalSlipKeys.has(key)) {
+          globalSlipKeys.add(key);
+          slips.push(buildSlip(slip, config, scores));
+          madeSlipThisRound = true;
+          onProgress?.(slips.length);
         }
       }
 
-      if (!best) break; // pool exhausted
-
-      const key = best.map(s => s.id).sort().join('|');
-      chosen.push(best);
-      chosenKeys.add(key);
-      for (const s of best) {
-        const fk = fixtureKey(s);
-        usage.set(fk, (usage.get(fk) || 0) + 1);
-      }
-
-      if (chosen.length % 10 === 0) {
-        onProgress?.(chosen.length);
-        await new Promise(r => setTimeout(r, 0));
-      }
+      // Round ends when no fresh picks remain to seed another slip
+      const remaining = pool.filter(s => !usedThisRound.has(fixtureKey(s)));
+      if (remaining.length < config.minPicksPerSlip) break;
+      // Safety: if the last attempt produced nothing valid and picks remain that
+      // can't form a target slip, bail this round to avoid an infinite loop.
+      if (!valid && slip.length === 0) break;
     }
-  } else {
-    // Legacy: manual repeat allowance, relaxes progressively
-    for (let allowance = config.maxRepeatAcrossSlips; allowance <= config.maxSlipsToGenerate; allowance++) {
-      for (const picks of candidatePool) {
-        if (chosen.length >= config.maxSlipsToGenerate) break;
-        const key = picks.map(s => s.id).sort().join('|');
-        if (chosenKeys.has(key)) continue;
-        const wouldExceed = picks.some(s => (usage.get(fixtureKey(s)) || 0) >= allowance);
-        if (wouldExceed) continue;
-        chosen.push(picks);
-        chosenKeys.add(key);
-        for (const s of picks) usage.set(fixtureKey(s), (usage.get(fixtureKey(s)) || 0) + 1);
-      }
-      onProgress?.(chosen.length);
-      await new Promise(r => setTimeout(r, 0));
-      if (chosen.length >= config.maxSlipsToGenerate) break;
-      if (chosen.length >= candidatePool.length) break;
-    }
-  }
 
-  onProgress?.(chosen.length);
-
-  const slips = chosen.map(picks => buildSlip(picks, config, scores));
-
-  // Final display order: keep coverage "rounds" intact by NOT resorting when in
-  // coverage mode (chosen order already reflects the round-by-round spread).
-  // In confidence mode, surface best quality first.
-  if (!config.coverageMode) {
-    if (scored) {
-      slips.sort((a, b) => b.qualityScore - a.qualityScore);
-    } else {
-      slips.sort((a, b) => {
-        const distA = Math.abs(a.accumulatedOdds - config.targetOdds);
-        const distB = Math.abs(b.accumulatedOdds - config.targetOdds);
-        if (Math.abs(distA - distB) > 0.001) return distA - distB;
-        return a.selectionCount - b.selectionCount;
-      });
-    }
+    // If a whole round produced no new slips, further rounds won't either — stop.
+    if (!madeSlipThisRound) break;
   }
 
   return slips;

@@ -70,6 +70,7 @@ export default function SlipGenerator({ selections, onGenerated, scores }: Props
       maxRepeatAcrossSlips: 1,
       futureOnly: true,
       coverageMode: true,
+      autoCapSlips: true,
       kickoffFrom: undefined,
       kickoffTo: undefined,
     };
@@ -125,6 +126,21 @@ export default function SlipGenerator({ selections, onGenerated, scores }: Props
 
   // How many pasted fixtures have already started (excluded when futureOnly is on)
   const pastCount = countPastFixtures(selections);
+
+  // Estimate how many ZERO-REPEAT slips one clean pass yields: eligible picks
+  // divided by the average picks needed to reach the target odds. This tells the
+  // user the ideal slip count where every fixture is used exactly once.
+  const cleanPassEstimate = (() => {
+    const eligibleCount = selections.length - (config.futureOnly ? pastCount : 0);
+    if (eligibleCount < config.minPicksPerSlip) return 0;
+    // avg pick odds within the safe band midpoint
+    const midOdds = (config.safeOddsRange.min + config.safeOddsRange.max) / 2 || 1.4;
+    const picksPerSlip = Math.max(
+      config.minPicksPerSlip,
+      Math.min(config.maxPicksPerSlip, Math.ceil(Math.log(config.targetOdds) / Math.log(midOdds)))
+    );
+    return Math.max(1, Math.floor(eligibleCount / picksPerSlip));
+  })();
 
   return (
     <div>
@@ -417,8 +433,29 @@ export default function SlipGenerator({ selections, onGenerated, scores }: Props
 
         {/* Max slips */}
         <div>
-          <label className="text-xs text-gray-400 block mb-1 flex items-center justify-between">
-            <span>Max Slips to Generate</span>
+          {/* Auto-cap toggle — overrides manual slip count */}
+          {config.coverageMode && (
+            <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer mb-2 p-2 bg-gray-800 rounded border border-green-900/50">
+              <input
+                type="checkbox"
+                checked={config.autoCapSlips}
+                onChange={(e) => setConfig({ ...config, autoCapSlips: e.target.checked })}
+                className="rounded"
+              />
+              <span>
+                Auto-cap slips (zero-repeat)
+                {config.autoCapSlips && cleanPassEstimate > 0 && (
+                  <span className="text-green-400 font-bold"> → {cleanPassEstimate} slips</span>
+                )}
+                <span className="block text-[10px] text-gray-500">
+                  Automatically generates exactly enough slips to use each fixture once. Overrides the count below.
+                </span>
+              </span>
+            </label>
+          )}
+
+          <label className={`text-xs block mb-1 flex items-center justify-between ${config.autoCapSlips && config.coverageMode ? 'text-gray-600' : 'text-gray-400'}`}>
+            <span>Max Slips to Generate {config.autoCapSlips && config.coverageMode && <span className="text-[10px]">(auto-capped)</span>}</span>
             <span className="text-blue-300 font-mono font-bold text-sm">{config.maxSlipsToGenerate}</span>
           </label>
           <input
@@ -427,8 +464,9 @@ export default function SlipGenerator({ selections, onGenerated, scores }: Props
             max="200"
             step="5"
             value={config.maxSlipsToGenerate}
+            disabled={config.autoCapSlips && config.coverageMode}
             onChange={(e) => setConfig({ ...config, maxSlipsToGenerate: parseInt(e.target.value) || 50 })}
-            className="w-full accent-blue-500"
+            className="w-full accent-blue-500 disabled:opacity-40"
           />
           <div className="flex items-center justify-between mt-1">
             <span className="text-[10px] text-gray-600">5</span>
@@ -442,6 +480,30 @@ export default function SlipGenerator({ selections, onGenerated, scores }: Props
             />
             <span className="text-[10px] text-gray-600">200</span>
           </div>
+          {/* Manual guidance only shown when auto-cap is OFF */}
+          {config.coverageMode && !config.autoCapSlips && cleanPassEstimate > 0 && (
+            <>
+              <div className="mt-2 flex items-center justify-between text-[11px]">
+                <span className="text-gray-400">
+                  Zero-repeat max: <span className="text-green-400 font-bold">{cleanPassEstimate} slips</span>
+                  <span className="text-gray-600"> (each fixture used once)</span>
+                </span>
+                {config.maxSlipsToGenerate !== cleanPassEstimate && (
+                  <button
+                    onClick={() => setConfig({ ...config, maxSlipsToGenerate: cleanPassEstimate })}
+                    className="px-2 py-0.5 bg-green-800 hover:bg-green-700 rounded text-green-200"
+                  >
+                    Match
+                  </button>
+                )}
+              </div>
+              {config.maxSlipsToGenerate > cleanPassEstimate && (
+                <p className="text-[10px] text-yellow-500 mt-1">
+                  Asking for more than {cleanPassEstimate} means some fixtures repeat across slips.
+                </p>
+              )}
+            </>
+          )}
         </div>
 
         {/* Past-fixture notice */}

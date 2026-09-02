@@ -82,6 +82,7 @@ export interface GroupingConfig {
   maxSlipsToGenerate: number;
   futureOnly: boolean; // Only include fixtures whose kickoff is still in the future
   coverageMode: boolean; // Coverage-driven distribution: exhaust the whole pool before any fixture repeats
+  autoCapSlips: boolean; // When true, cap slip count to the zero-repeat clean-pass max (overrides maxSlipsToGenerate)
   // Kickoff-window filter (for sequenced/tiered rollover). Empty = no window.
   kickoffFrom?: string; // ISO datetime-local string, e.g. "2026-09-02T00:00"
   kickoffTo?: string;   // ISO datetime-local string

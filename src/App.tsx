@@ -616,7 +616,7 @@ export default function App() {
         id: crypto.randomUUID(),
         selections: mergedSelections,
         accumulatedOdds: Math.round(accOdds * 100) / 100,
-        qualityScore: calculateQuality(mergedSelections, DEFAULT_CONFIG, scoreMap),
+        qualityScore: calculateQuality(mergedSelections, DEFAULT_CONFIG),
         hasHighRiskPick: mergedSelections.some(s => s.odds > 1.6),
         selectionCount: mergedSelections.length,
       };
@@ -636,7 +636,7 @@ export default function App() {
         selections: remaining,
         accumulatedOdds: Math.round(accOdds * 100) / 100,
         selectionCount: remaining.length,
-        qualityScore: calculateQuality(remaining, DEFAULT_CONFIG, scoreMap),
+        qualityScore: calculateQuality(remaining, DEFAULT_CONFIG),
         hasHighRiskPick: remaining.some(s => s.odds > 1.6),
       };
     }).filter(Boolean));
@@ -1209,7 +1209,7 @@ export default function App() {
                     onSlipStaked={handleSlipStaked}
                     onRemoveSlip={handleRemoveSlip}
                     onRemovePick={handleRemovePick}
-                    scores={scoreMap}
+                    /* No scores — Paste page shows pure market-implied win% only */
                   />
                 </div>
               )}
@@ -1220,7 +1220,9 @@ export default function App() {
                 <SlipGenerator
                   selections={selections}
                   onGenerated={setGeneratedSlips}
-                  scores={scoreMap}
+                  /* No scores passed — Paste & Build is pure distribution of YOUR
+                     hand-studied predictions. The prediction/scoring engine belongs
+                     to the Scout workflow only, never here. */
                 />
               )}
             </div>
