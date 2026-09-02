@@ -187,6 +187,21 @@ function categorizeMarket(market: string): { type: MarketType; variant: string |
   if (lower === 'goal bounds') {
     return { type: 'goal_bounds', variant: null };
   }
+  // Fouls market: "Home Team Fouls Over/Under", "Away Team Fouls Over/Under"
+  if (lower.includes('foul')) {
+    const variant = lower.includes('home') ? 'home' : lower.includes('away') ? 'away' : null;
+    return { type: 'fouls', variant };
+  }
+  // Corners market: "Corner Over/Under", "Home Team Corners", etc.
+  if (lower.includes('corner')) {
+    const variant = lower.includes('home') ? 'home' : lower.includes('away') ? 'away' : null;
+    return { type: 'corners', variant };
+  }
+  // Cards market: "Card Over/Under", "Home Team Cards", "Booking", etc.
+  if (lower.includes('card') || lower.includes('booking')) {
+    const variant = lower.includes('home') ? 'home' : lower.includes('away') ? 'away' : null;
+    return { type: 'cards', variant };
+  }
   if (lower.includes('over/under')) {
     // Team-specific: "Bayern Munich Over/Under"
     if (!lower.startsWith('over/under') && !lower.includes('- over/under') && !lower.includes('half')) {

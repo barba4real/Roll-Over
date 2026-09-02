@@ -9,6 +9,7 @@ import { getAllUpcomingEvents as getSportmonksEvents, getSportmonksToken } from 
 import { getAllUpcomingEvents as getOpenLigaEvents } from '../engine/openligadb';
 import { fetchAllProviders } from '../engine/provider-orchestrator';
 import { fetchLeagueStats, getCachedTeamStats, TeamStats } from '../engine/stats-calculator';
+import { fetchDayFixtures } from '../engine/flashscore';
 import { LockedMatch, loadLockedMatches, saveLockedMatches, isMatchLocked, lockedToSelections } from '../engine/fixture-store';
 
 interface Props {
@@ -16,7 +17,7 @@ interface Props {
   onStatsLoaded?: () => void;
 }
 
-type ApiProvider = 'thesportsdb' | 'espn' | 'football-data' | 'api-football' | 'kickoff-api' | 'sportmonks' | 'openligadb' | 'all';
+type ApiProvider = 'flashscore' | 'thesportsdb' | 'espn' | 'football-data' | 'api-football' | 'kickoff-api' | 'sportmonks' | 'openligadb' | 'all';
 
 interface SearchResult {
   matchId: number;
@@ -57,9 +58,7 @@ const FILTER_OPTIONS: { value: SearchFilter; label: string; description: string 
 export default function MatchSearch({ onAddPicks, onStatsLoaded }: Props) {
   const [filter, setFilter] = useState<SearchFilter>('home_advantage');
   const [days, setDays] = useState(7);
-  const [provider, setProvider] = useState<ApiProvider>(() => {
-    return (localStorage.getItem('rollover_search_provider') as ApiProvider) || 'thesportsdb';
-  });
+  const [provider, setProvider] = useState<ApiProvider>('flashscore');
   const [results, setResults] = useState<SearchResult[]>(() => {
     // Load from fixture library cache on mount
     try {
@@ -138,14 +137,14 @@ export default function MatchSearch({ onAddPicks, onStatsLoaded }: Props) {
       setError('Football-Data.org API key required. Set it in Match Scout > API Settings.');
       return;
     }
-    // TheSportsDB and ESPN need no keys
+    // TheSportsDB, ESPN, and Flashscore need no keys
 
     setLoading(true);
     setError(null);
     setResults([]);
 
     const selectedCodes = leagues.filter((l: any) => l.checked).map((l: any) => l.code);
-    if (selectedCodes.length === 0) {
+    if (selectedCodes.length === 0 && provider !== 'flashscore') {
       setError('Select at least one league.');
       setLoading(false);
       return;
@@ -154,7 +153,25 @@ export default function MatchSearch({ onAddPicks, onStatsLoaded }: Props) {
     try {
       let fixtures: any[] = [];
 
-      if (provider === 'thesportsdb') {
+      if (provider === 'flashscore') {
+        // Flashscore: fetch upcoming fixtures for the next N days
+        const allFs: any[] = [];
+        for (let d = 0; d < Math.min(days, 7); d++) {
+          const dayFixtures = await fetchDayFixtures(d);
+          const upcoming = dayFixtures.filter(f => !f.isFinished);
+          for (const f of upcoming) {
+            allFs.push({
+              id: f.matchId,
+              homeTeam: { id: 0, name: f.homeTeam },
+              awayTeam: { id: 0, name: f.awayTeam },
+              utcDate: `${f.date}T${f.time}:00`,
+              competitionName: `${f.country}: ${f.league}`,
+              competitionCode: f.league,
+            });
+          }
+        }
+        fixtures = allFs;
+      } else if (provider === 'thesportsdb') {
         const selectedIds = leagues.filter((l: any) => l.checked).map((l: any) => l.code);
         const sportsDbIds = SPORTSDB_LEAGUES
           .filter(l => selectedIds.some((code: string) => l.name.toLowerCase().includes(code.toLowerCase()) || code === l.id))
@@ -169,7 +186,7 @@ export default function MatchSearch({ onAddPicks, onStatsLoaded }: Props) {
           competitionCode: e.leagueId || '',
         }));
       } else if (provider === 'espn') {
-        const events = await getEspnEvents(undefined, days);
+        const events = await getEspnEvents(undefined, Math.min(days, 3));
         fixtures = events.map((e: any) => ({
           id: e.id,
           homeTeam: { id: 0, name: e.homeTeam },
@@ -181,38 +198,13 @@ export default function MatchSearch({ onAddPicks, onStatsLoaded }: Props) {
       } else if (provider === 'football-data') {
         fixtures = await getAllUpcomingMatches(days, selectedCodes);
       } else if (provider === 'api-football') {
-        if (!getApiFootballKey()) { setError('API-Football key not set. Add it in API Settings.'); setLoading(false); return; }
-        const leagueIds = TOP_LEAGUES.filter(l =>
-          selectedCodes.some((code: string) => l.name.toLowerCase().includes(code.toLowerCase()))
-        ).map(l => l.id);
-        const raw = await getApiFootballFixtures(Math.min(days, 3), leagueIds.length > 0 ? leagueIds : TOP_LEAGUES.map(l => l.id));
-        fixtures = raw.map((f: any) => ({
-          id: f.fixture?.id || 0,
-          homeTeam: { id: f.teams?.home?.id || 0, name: f.teams?.home?.name || '' },
-          awayTeam: { id: f.teams?.away?.id || 0, name: f.teams?.away?.name || '' },
-          utcDate: f.fixture?.date || '',
-          competitionName: f.league?.name || '',
-          competitionCode: f.league?.id?.toString() || '',
-        }));
+        setError('API-Football is not available. Use "All Providers" or ESPN instead.');
+        setLoading(false);
+        return;
       } else if (provider === 'kickoff-api') {
-        if (!getKickoffApiKey()) { setError('KickoffAPI key not set. Get free key at kickoffapi.com'); setLoading(false); return; }
-        const leagueIds = Object.entries(KICKOFF_LEAGUES)
-          .filter(([code]) => selectedCodes.includes(code))
-          .map(([, id]) => id);
-        const targetLeagues = leagueIds.length > 0 ? leagueIds : Object.values(KICKOFF_LEAGUES).slice(0, 5);
-        const allRaw: any[] = [];
-        for (const leagueId of targetLeagues) {
-          const raw = await getKickoffFixtures(leagueId, days);
-          allRaw.push(...raw);
-        }
-        fixtures = allRaw.map((f: any) => ({
-          id: f.id || 0,
-          homeTeam: { id: f.homeTeam?.id || 0, name: f.homeTeam?.name || '' },
-          awayTeam: { id: f.awayTeam?.id || 0, name: f.awayTeam?.name || '' },
-          utcDate: f.date || '',
-          competitionName: '',
-          competitionCode: '',
-        }));
+        setError('KickoffAPI is not available. Use "All Providers" or ESPN instead.');
+        setLoading(false);
+        return;
       } else if (provider === 'sportmonks') {
         if (!getSportmonksToken()) { setError('Sportmonks token not set. Get free token at sportmonks.com'); setLoading(false); return; }
         const events = await getSportmonksEvents(days);
@@ -235,8 +227,8 @@ export default function MatchSearch({ onAddPicks, onStatsLoaded }: Props) {
           competitionCode: e.leagueShortcut || '',
         }));
       } else if (provider === 'all') {
-        // Multi-provider merge via orchestrator
-        const result = await fetchAllProviders({ days, leagueCodes: selectedCodes, useFootballData: true, useTheSportsDb: true, useEspn: true, useApiFootball: true, useKickoffApi: true });
+        // Multi-provider merge via orchestrator (only working providers)
+        const result = await fetchAllProviders({ days, leagueCodes: selectedCodes, useFootballData: !!getFootballDataKey(), useTheSportsDb: true, useEspn: true, useApiFootball: false, useKickoffApi: false });
         fixtures = result.fixtures.map(f => ({
           id: f.id,
           homeTeam: { id: f.homeTeam.id, name: f.homeTeam.name },
@@ -525,25 +517,7 @@ export default function MatchSearch({ onAddPicks, onStatsLoaded }: Props) {
 
         <div className="flex items-center gap-3 mb-3">
           <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-400">Provider:</span>
-            <select
-              value={provider}
-              onChange={(e) => {
-                const p = e.target.value as ApiProvider;
-                setProvider(p);
-                localStorage.setItem('rollover_search_provider', p);
-              }}
-              className="px-2 py-1 bg-gray-800 border border-gray-600 rounded text-xs focus:outline-none"
-            >
-              <option value="all">All Providers (merged)</option>
-              <option value="thesportsdb">TheSportsDB (no key)</option>
-              <option value="espn">ESPN (no key)</option>
-              <option value="football-data">Football-Data.org (key)</option>
-              <option value="api-football">API-Football (key, 100/day)</option>
-              <option value="kickoff-api">KickoffAPI (key, 100/day)</option>
-              <option value="sportmonks">Sportmonks (key, Danish/Scottish)</option>
-              <option value="openligadb">OpenLigaDB (no key, German/European)</option>
-            </select>
+            <span className="text-xs text-blue-400 font-medium">Flashscore (365 leagues)</span>
           </div>
 
           <div className="flex items-center gap-2">

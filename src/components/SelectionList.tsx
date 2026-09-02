@@ -2,6 +2,9 @@ import React, { useState, useMemo } from 'react';
 import { ParsedSelection } from '../engine/types';
 import { interpretMarket, getMarketCategory } from '../engine/market-interpreter';
 import { ScoringResult } from '../engine/scoring';
+import { computeMatchIntelligence, MatchIntelligence, getFormString, getGoalAverages } from '../engine/intelligence-hints';
+import { getAllMatches } from '../engine/historical-stats';
+import MatchStatsModal from './MatchStatsModal';
 
 interface Props {
   selections: ParsedSelection[];
@@ -12,13 +15,44 @@ interface Props {
   onExportSelections?: () => void;
   onImportSelections?: (file: File) => void;
   onClearSelections?: () => void;
+  onAnalyze?: (homeTeam: string, awayTeam: string, league: string) => void;
 }
 
-export default function SelectionList({ selections, scores, onUpdateOdds, onRemoveSelection, onUseFiltered, onExportSelections, onImportSelections, onClearSelections }: Props) {
+export default function SelectionList({ selections, scores, onUpdateOdds, onRemoveSelection, onUseFiltered, onExportSelections, onImportSelections, onClearSelections, onAnalyze }: Props) {
   const [pickFilter, setPickFilter] = useState<string>('all');
   const [marketFilter, setMarketFilter] = useState<string>('all');
   const [dateFilter, setDateFilter] = useState<string>('all');
+  const [dateFrom, setDateFrom] = useState<string>('');
+  const [dateTo, setDateTo] = useState<string>('');
+  const [oddsMin, setOddsMin] = useState<string>('');
+  const [oddsMax, setOddsMax] = useState<string>('');
+  const [futureOnly, setFutureOnly] = useState<boolean>(false);
   const [sortBy, setSortBy] = useState<'kickoff' | 'odds_asc' | 'odds_desc' | 'team' | 'score_desc'>('kickoff');
+  const [statsModal, setStatsModal] = useState<ParsedSelection | null>(null);
+  const [intelCache, setIntelCache] = useState<Map<string, MatchIntelligence>>(new Map());
+  const [analyzingAll, setAnalyzingAll] = useState(false);
+
+  // Compute intelligence for all unique fixtures (lazy on demand)
+  async function analyzeAllFixtures() {
+    setAnalyzingAll(true);
+    const allMatches = getAllMatches();
+    if (allMatches.length === 0) { setAnalyzingAll(false); return; }
+    const cache = new Map<string, MatchIntelligence>();
+    const seen = new Set<string>();
+    for (const sel of selections) {
+      const key = `${sel.homeTeam}|${sel.awayTeam}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const intel = computeMatchIntelligence(sel.homeTeam, sel.awayTeam, allMatches);
+      cache.set(key, intel);
+    }
+    setIntelCache(cache);
+    setAnalyzingAll(false);
+  }
+
+  function getIntel(sel: ParsedSelection): MatchIntelligence | undefined {
+    return intelCache.get(`${sel.homeTeam}|${sel.awayTeam}`);
+  }
 
   if (selections.length === 0) return null;
 
@@ -42,7 +76,36 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
     const pickMatch = pickFilter === 'all' || s.pick === pickFilter;
     const catMatch = marketFilter === 'all' || getMarketCategory(s) === marketFilter;
     const dateMatch = dateFilter === 'all' || s.date === dateFilter;
-    return pickMatch && catMatch && dateMatch;
+
+    // Date range filter
+    let rangeMatch = true;
+    if (dateFrom || dateTo) {
+      const kickOff = s.kickOffDateTime ? new Date(s.kickOffDateTime).getTime() : 0;
+      if (dateFrom && kickOff) {
+        const from = new Date(dateFrom).getTime();
+        if (kickOff < from) rangeMatch = false;
+      }
+      if (dateTo && kickOff) {
+        const to = new Date(dateTo).getTime() + 24 * 60 * 60 * 1000; // End of day
+        if (kickOff > to) rangeMatch = false;
+      }
+    }
+
+    // Odds range filter
+    let oddsMatch = true;
+    const oMin = parseFloat(oddsMin);
+    const oMax = parseFloat(oddsMax);
+    if (!isNaN(oMin) && s.odds < oMin) oddsMatch = false;
+    if (!isNaN(oMax) && s.odds > oMax) oddsMatch = false;
+
+    // Future-only filter
+    let futureMatch = true;
+    if (futureOnly) {
+      const kickoff = s.kickOffDateTime ? new Date(s.kickOffDateTime).getTime() : NaN;
+      if (!isNaN(kickoff) && kickoff <= Date.now() - 5 * 60 * 1000) futureMatch = false;
+    }
+
+    return pickMatch && catMatch && dateMatch && rangeMatch && oddsMatch && futureMatch;
   }).sort((a, b) => {
     switch (sortBy) {
       case 'kickoff': return new Date(a.kickOffDateTime).getTime() - new Date(b.kickOffDateTime).getTime();
@@ -71,6 +134,13 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
           Active Selections ({selections.length})
         </h3>
         <div className="flex gap-2">
+          <button
+            onClick={analyzeAllFixtures}
+            disabled={analyzingAll}
+            className="px-2 py-1 bg-blue-700 hover:bg-blue-600 disabled:bg-gray-600 rounded text-xs text-white font-medium"
+          >
+            {analyzingAll ? 'Analyzing...' : intelCache.size > 0 ? `Intel (${intelCache.size})` : 'Analyze All'}
+          </button>
           {onExportSelections && selections.length > 0 && (
             <button
               onClick={onExportSelections}
@@ -143,14 +213,14 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
 
         {(pickFilter !== 'all' || marketFilter !== 'all') && (
           <button
-            onClick={() => { setPickFilter('all'); setMarketFilter('all'); setDateFilter('all'); }}
+            onClick={() => { setPickFilter('all'); setMarketFilter('all'); setDateFilter('all'); setDateFrom(''); setDateTo(''); }}
             className="text-xs text-gray-500 hover:text-gray-300"
           >
             Clear
           </button>
         )}
 
-        {(pickFilter !== 'all' || marketFilter !== 'all' || dateFilter !== 'all') && onUseFiltered && filtered.length >= 2 && (
+        {(pickFilter !== 'all' || marketFilter !== 'all' || dateFilter !== 'all' || dateFrom || dateTo) && onUseFiltered && filtered.length >= 2 && (
           <button
             onClick={() => onUseFiltered(filtered)}
             className="text-xs px-2 py-0.5 bg-green-700 hover:bg-green-600 rounded text-white font-medium"
@@ -165,7 +235,7 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
       </div>
 
       {/* Date filter & Sort */}
-      <div className="flex gap-2 mb-2 items-center">
+      <div className="flex gap-2 mb-2 items-center flex-wrap">
         <div className="flex items-center gap-1">
           <span className="text-xs text-gray-500">Date:</span>
           <select
@@ -181,6 +251,56 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
             ))}
           </select>
         </div>
+
+        {/* Date Range */}
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-gray-500">From:</span>
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+            className="px-1.5 py-0.5 bg-gray-800 border border-gray-600 rounded text-xs text-gray-300 focus:outline-none focus:border-blue-500"
+          />
+        </div>
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-gray-500">To:</span>
+          <input
+            type="date"
+            value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)}
+            className="px-1.5 py-0.5 bg-gray-800 border border-gray-600 rounded text-xs text-gray-300 focus:outline-none focus:border-blue-500"
+          />
+        </div>
+        {(dateFrom || dateTo) && (
+          <button onClick={() => { setDateFrom(''); setDateTo(''); }} className="text-[10px] text-gray-500 hover:text-gray-300">
+            Clear range
+          </button>
+        )}
+
+        {/* Odds range filter */}
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-gray-500">Odds:</span>
+          <input
+            type="number" step="0.05" placeholder="min" value={oddsMin}
+            onChange={(e) => setOddsMin(e.target.value)}
+            className="w-14 px-1.5 py-0.5 bg-gray-800 border border-gray-600 rounded text-xs text-gray-300 focus:outline-none focus:border-blue-500"
+          />
+          <span className="text-xs text-gray-600">–</span>
+          <input
+            type="number" step="0.05" placeholder="max" value={oddsMax}
+            onChange={(e) => setOddsMax(e.target.value)}
+            className="w-14 px-1.5 py-0.5 bg-gray-800 border border-gray-600 rounded text-xs text-gray-300 focus:outline-none focus:border-blue-500"
+          />
+          {(oddsMin || oddsMax) && (
+            <button onClick={() => { setOddsMin(''); setOddsMax(''); }} className="text-[10px] text-gray-500 hover:text-gray-300">✕</button>
+          )}
+        </div>
+
+        {/* Future-only quick filter */}
+        <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer">
+          <input type="checkbox" checked={futureOnly} onChange={(e) => setFutureOnly(e.target.checked)} className="rounded" />
+          Future only
+        </label>
 
         <div className="flex items-center gap-1">
           <span className="text-xs text-gray-500">Sort:</span>
@@ -223,10 +343,45 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
                     {sel.date} {sel.time}
                   </td>
                   <td className="py-2 px-2">
-                    <span className="text-gray-200">{sel.homeTeam}</span>
-                    <span className="text-gray-500"> v </span>
-                    <span className="text-gray-200">{sel.awayTeam}</span>
-                    {multiPick && <span className="ml-1 text-xs text-purple-400" title="Multiple picks for this match">●</span>}
+                    <div
+                      className="cursor-pointer hover:bg-gray-750 rounded px-1 -mx-1"
+                      onClick={() => setStatsModal(sel)}
+                    >
+                      <span className="text-gray-200">{sel.homeTeam}</span>
+                      <span className="text-gray-500"> v </span>
+                      <span className="text-gray-200">{sel.awayTeam}</span>
+                      {multiPick && <span className="ml-1 text-xs text-purple-400" title="Multiple picks for this match">●</span>}
+                      {/* Inline intelligence indicators */}
+                      {(() => {
+                        const intel = getIntel(sel);
+                        if (!intel) return null;
+                        const homeForm = getFormString(intel.homeTeam.homeForm);
+                        const awayForm = getFormString(intel.awayTeam.awayForm);
+                        const topHint = [...intel.homeTeam.hints, ...intel.awayTeam.hints, ...intel.h2hHints]
+                          .filter(h => h.strength === 'strong')[0];
+                        return (
+                          <div className="flex items-center gap-2 mt-0.5">
+                            {homeForm && (
+                              <span className="text-[9px] text-gray-500">
+                                H: {homeForm.split('').map((r, i) => (
+                                  <span key={i} className={r === 'W' ? 'text-green-400' : r === 'L' ? 'text-red-400' : 'text-yellow-400'}>{r}</span>
+                                ))}
+                              </span>
+                            )}
+                            {awayForm && (
+                              <span className="text-[9px] text-gray-500">
+                                A: {awayForm.split('').map((r, i) => (
+                                  <span key={i} className={r === 'W' ? 'text-green-400' : r === 'L' ? 'text-red-400' : 'text-yellow-400'}>{r}</span>
+                                ))}
+                              </span>
+                            )}
+                            {topHint && (
+                              <span className="text-[9px] text-green-400">{topHint.icon} {topHint.text.substring(0, 35)}{topHint.text.length > 35 ? '...' : ''}</span>
+                            )}
+                          </div>
+                        );
+                      })()}
+                    </div>
                   </td>
                   <td className="py-2 px-2">
                     <span className={`font-medium ${sel.odds > 1.5 ? 'text-yellow-400' : 'text-green-400'}`}>
@@ -278,6 +433,17 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
                       </td>
                     );
                   })()}
+                  {onAnalyze && (
+                    <td className="py-2 px-2 text-center">
+                      <button
+                        onClick={() => onAnalyze(sel.homeTeam, sel.awayTeam, '')}
+                        className="text-gray-600 hover:text-blue-400 text-[10px]"
+                        title="Analyze this fixture"
+                      >
+                        Analyze
+                      </button>
+                    </td>
+                  )}
                   {onRemoveSelection && (
                     <td className="py-2 px-2 text-center">
                       <button
@@ -295,6 +461,15 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
           </tbody>
         </table>
       </div>
+
+      {/* Match Stats Modal */}
+      {statsModal && (
+        <MatchStatsModal
+          selection={statsModal}
+          selResult="pending"
+          onClose={() => setStatsModal(null)}
+        />
+      )}
     </div>
   );
 }

@@ -9,7 +9,7 @@ export interface ParsedSelection {
   homeTeam: string;
   awayTeam: string;
   status: 'not_started' | 'live' | 'won' | 'lost' | 'void';
-  score: { home: number; away: number } | null;
+  score: { home: number; away: number; htHome?: number; htAway?: number } | null;
   pick: string;
   pickCategory: PickCategory;
   odds: number;
@@ -50,6 +50,9 @@ export type MarketType =
   | 'goal_bounds'
   | 'correct_score'
   | 'combo'
+  | 'fouls'
+  | 'corners'
+  | 'cards'
   | 'special'
   | 'other';
 
@@ -72,8 +75,16 @@ export interface GroupingConfig {
   safeOddsRange: { min: number; max: number }; // Picks within this range are "safe zone"
   maxHighRiskPerSlip: number;
   noSameTeam: boolean;
-  noSameKickoff: boolean;
+  noSameKickoff: boolean; // When true, two picks with identical kickoff can't share a slip
+  spreadAcrossDates: boolean;
+  maxPicksPerDay: number; // 0 = no limit
+  maxRepeatAcrossSlips: number; // Legacy manual cap. When coverageMode is on, this is ignored.
   maxSlipsToGenerate: number;
+  futureOnly: boolean; // Only include fixtures whose kickoff is still in the future
+  coverageMode: boolean; // Coverage-driven distribution: exhaust the whole pool before any fixture repeats
+  // Kickoff-window filter (for sequenced/tiered rollover). Empty = no window.
+  kickoffFrom?: string; // ISO datetime-local string, e.g. "2026-09-02T00:00"
+  kickoffTo?: string;   // ISO datetime-local string
 }
 
 // Rollover chain

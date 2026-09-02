@@ -182,3 +182,170 @@ function parseMatch(raw: any): OpenLigaMatch | null {
     awayScore: finalResult?.pointsTeam2 ?? null,
   };
 }
+
+// ─── Maximized Endpoints ─────────────────────────────────────────────────────
+
+/**
+ * Get ALL finished matches for a league season as HistoricalMatch format.
+ * Includes goals scored info. Used for bulk DB population.
+ */
+export async function fetchSeasonResults(leagueShortcut: string, season?: number): Promise<import('./football-data-uk').HistoricalMatch[]> {
+  const s = season || getCurrentSeason();
+  const data = await apiFetch(`/getmatchdata/${leagueShortcut}/${s}`);
+  if (!Array.isArray(data)) return [];
+
+  const matches: import('./football-data-uk').HistoricalMatch[] = [];
+  for (const raw of data) {
+    if (!raw.matchIsFinished) continue;
+    const team1 = raw.team1;
+    const team2 = raw.team2;
+    if (!team1 || !team2) continue;
+
+    const results = raw.matchResults || [];
+    const finalResult = results.find((r: any) => r.resultTypeID === 2) || results[results.length - 1];
+    const htResult = results.find((r: any) => r.resultTypeID === 1);
+
+    const homeGoals = finalResult?.pointsTeam1;
+    const awayGoals = finalResult?.pointsTeam2;
+    if (homeGoals == null || awayGoals == null) continue;
+
+    matches.push({
+      division: leagueShortcut,
+      date: raw.matchDateTimeUTC?.split('T')[0] || '',
+      time: raw.matchDateTimeUTC?.split('T')[1]?.slice(0, 5) || '',
+      homeTeam: team1.teamName || team1.shortName || '',
+      awayTeam: team2.teamName || team2.shortName || '',
+      ftHomeGoals: homeGoals,
+      ftAwayGoals: awayGoals,
+      ftResult: homeGoals > awayGoals ? 'H' : homeGoals < awayGoals ? 'A' : 'D',
+      htHomeGoals: htResult?.pointsTeam1 ?? null,
+      htAwayGoals: htResult?.pointsTeam2 ?? null,
+      htResult: htResult ? (htResult.pointsTeam1 > htResult.pointsTeam2 ? 'H' : htResult.pointsTeam1 < htResult.pointsTeam2 ? 'A' : 'D') : null,
+      homeShots: null,
+      awayShots: null,
+      homeShotsOnTarget: null,
+      awayShotsOnTarget: null,
+      homeCorners: null,
+      awayCorners: null,
+      homeYellows: null,
+      awayYellows: null,
+      homeReds: null,
+            awayReds: null,
+            homeFouls: null,
+            awayFouls: null,
+      season: `${s}-${s + 1}`,
+      leagueId: OPENLIGA_LEAGUES.find(l => l.shortcut === leagueShortcut)?.name || leagueShortcut,
+    });
+  }
+
+  return matches;
+}
+
+/**
+ * Get all finished results from ALL OpenLigaDB leagues for DB population.
+ */
+export async function fetchAllResults(seasons: number = 1): Promise<import('./football-data-uk').HistoricalMatch[]> {
+  const currentSeason = getCurrentSeason();
+  const allMatches: import('./football-data-uk').HistoricalMatch[] = [];
+
+  for (let i = 0; i < seasons; i++) {
+    const s = currentSeason - i;
+    for (const league of OPENLIGA_LEAGUES) {
+      try {
+        const matches = await fetchSeasonResults(league.shortcut, s);
+        allMatches.push(...matches);
+      } catch {}
+    }
+  }
+
+  return allMatches;
+}
+
+/**
+ * Get goal scorers for a specific match.
+ * OpenLigaDB: /getgoals/{matchId}
+ */
+export async function getMatchGoals(matchId: number): Promise<OpenLigaGoal[]> {
+  const data = await apiFetch(`/getgoals/${matchId}`);
+  if (!Array.isArray(data)) return [];
+
+  return data.map((g: any) => ({
+    scorer: g.goalGetterName || '',
+    minute: g.matchMinute || 0,
+    homeScore: g.scoreTeam1 || 0,
+    awayScore: g.scoreTeam2 || 0,
+    isPenalty: g.isPenalty || false,
+    isOwnGoal: g.isOwnGoal || false,
+  }));
+}
+
+/**
+ * Get matches for a specific matchday.
+ * OpenLigaDB: /getmatchdata/{league}/{season}/{matchday}
+ */
+export async function getMatchday(leagueShortcut: string, matchday: number, season?: number): Promise<OpenLigaMatch[]> {
+  const s = season || getCurrentSeason();
+  const data = await apiFetch(`/getmatchdata/${leagueShortcut}/${s}/${matchday}`);
+  if (!Array.isArray(data)) return [];
+  return data.map(parseMatch).filter((m): m is OpenLigaMatch => m !== null);
+}
+
+/**
+ * Get the current matchday number for a league.
+ * OpenLigaDB: /getcurrentgroup/{league}
+ */
+export async function getCurrentMatchday(leagueShortcut: string): Promise<number> {
+  const data = await apiFetch(`/getcurrentgroup/${leagueShortcut}`);
+  return data?.groupOrderID || 1;
+}
+
+/**
+ * Get head-to-head between two teams by filtering season matches.
+ * OpenLigaDB doesn't have a direct H2H endpoint, so we filter from full season data.
+ */
+export async function getH2H(team1: string, team2: string, leagueShortcut: string = 'bl1', seasonsBack: number = 3): Promise<OpenLigaMatch[]> {
+  const currentSeason = getCurrentSeason();
+  const h2hMatches: OpenLigaMatch[] = [];
+
+  for (let i = 0; i < seasonsBack; i++) {
+    const s = currentSeason - i;
+    const data = await apiFetch(`/getmatchdata/${leagueShortcut}/${s}`);
+    if (!Array.isArray(data)) continue;
+
+    for (const raw of data) {
+      if (!raw.matchIsFinished) continue;
+      const t1 = (raw.team1?.teamName || '').toLowerCase();
+      const t2 = (raw.team2?.teamName || '').toLowerCase();
+      const q1 = team1.toLowerCase();
+      const q2 = team2.toLowerCase();
+
+      if ((t1.includes(q1) || q1.includes(t1)) && (t2.includes(q2) || q2.includes(t2)) ||
+          (t1.includes(q2) || q2.includes(t1)) && (t2.includes(q1) || q1.includes(t2))) {
+        const parsed = parseMatch(raw);
+        if (parsed) h2hMatches.push(parsed);
+      }
+    }
+  }
+
+  return h2hMatches;
+}
+
+/**
+ * Get available leagues list from the API.
+ */
+export async function getAvailableLeagues(): Promise<any[]> {
+  const data = await apiFetch('/getavailableleagues');
+  if (!Array.isArray(data)) return [];
+  return data;
+}
+
+// ─── Types (additions) ───────────────────────────────────────────────────────
+
+export interface OpenLigaGoal {
+  scorer: string;
+  minute: number;
+  homeScore: number;
+  awayScore: number;
+  isPenalty: boolean;
+  isOwnGoal: boolean;
+}

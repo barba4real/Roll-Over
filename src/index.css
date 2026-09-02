@@ -2,9 +2,100 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+@layer base {
+  /* Dark theme (default) — NOT pure black, use charcoal tones */
+  :root {
+    --bg-primary: #1a1f2e;
+    --bg-secondary: #232a3b;
+    --bg-tertiary: #2d3548;
+    --text-primary: #e8ecf4;
+    --text-secondary: #b8c1d1;
+    --text-muted: #8892a4;
+    --text-dim: #5f6b7a;
+    --border-color: #3a4356;
+  }
+
+  /* Light theme — NOT pure white, use warm off-white */
+  .light {
+    --bg-primary: #f5f6f8;
+    --bg-secondary: #ebedf2;
+    --bg-tertiary: #e0e3ea;
+    --text-primary: #1a2033;
+    --text-secondary: #3a4560;
+    --text-muted: #5a6580;
+    --text-dim: #7a859a;
+    --border-color: #d0d5e0;
+  }
+
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    transition: background-color 0.2s, color 0.2s;
+  }
+
+  /* ─── Dark mode refinements (charcoal, not black) ──────────────────────── */
+  .dark .bg-gray-900, :not(.light) .bg-gray-900 { background-color: #1a1f2e !important; }
+  .dark .bg-gray-800, :not(.light) .bg-gray-800 { background-color: #232a3b !important; }
+  .dark .bg-gray-700, :not(.light) .bg-gray-700 { background-color: #2d3548 !important; }
+  .dark .text-gray-200, :not(.light) .text-gray-200 { color: #edf0f7 !important; }
+  .dark .text-gray-300, :not(.light) .text-gray-300 { color: #d5dce8 !important; }
+  .dark .text-gray-400, :not(.light) .text-gray-400 { color: #a8b4c8 !important; }
+  .dark .text-gray-500, :not(.light) .text-gray-500 { color: #8d9bb4 !important; }
+  .dark .text-gray-600, :not(.light) .text-gray-600 { color: #7889a4 !important; }
+  .dark .border-gray-700, :not(.light) .border-gray-700 { border-color: #3a4356 !important; }
+  .dark .border-gray-600, :not(.light) .border-gray-600 { border-color: #4a5568 !important; }
+
+  /* ─── Light mode overrides ─────────────────────────────────────────────── */
+  .light .bg-gray-900 { background-color: #f5f6f8 !important; }
+  .light .bg-gray-800 { background-color: #ebedf2 !important; }
+  .light .bg-gray-700 { background-color: #e0e3ea !important; }
+  .light .bg-gray-850 { background-color: #e5e8ef !important; }
+  .light .text-gray-200 { color: #1a2033 !important; }
+  .light .text-gray-300 { color: #2a3550 !important; }
+  .light .text-gray-400 { color: #3a4d6a !important; }
+  .light .text-gray-500 { color: #4a5f7a !important; }
+  .light .text-gray-600 { color: #5a6f8a !important; }
+  .light .border-gray-700 { border-color: #d0d5e0 !important; }
+  .light .border-gray-600 { border-color: #bcc3d4 !important; }
+
+  /* Light mode accent colors — deeper/darker for contrast */
+  .light .text-blue-400 { color: #1d4ed8 !important; }
+  .light .text-green-400 { color: #047857 !important; }
+  .light .text-green-300 { color: #059669 !important; }
+  .light .text-yellow-400 { color: #b45309 !important; }
+  .light .text-yellow-300 { color: #d97706 !important; }
+  .light .text-red-400 { color: #b91c1c !important; }
+  .light .text-red-300 { color: #dc2626 !important; }
+  .light .text-purple-300 { color: #7c3aed !important; }
+  .light .text-indigo-300 { color: #4338ca !important; }
+  .light .text-cyan-300 { color: #0e7490 !important; }
+
+  /* Light mode backgrounds for badges/cards */
+  .light .bg-blue-600 { background-color: #2563eb !important; }
+  .light .bg-blue-700 { background-color: #1d4ed8 !important; }
+  .light .bg-green-600 { background-color: #059669 !important; }
+  .light .bg-green-700 { background-color: #047857 !important; }
+  .light .bg-green-900 { background-color: #d1fae5 !important; color: #065f46 !important; }
+  .light .bg-yellow-900 { background-color: #fef3c7 !important; color: #92400e !important; }
+  .light .bg-red-900 { background-color: #fee2e2 !important; color: #991b1b !important; }
+  .light .bg-red-700 { background-color: #b91c1c !important; }
+  .light .bg-blue-900 { background-color: #dbeafe !important; color: #1e40af !important; }
+  .light .bg-purple-900 { background-color: #ede9fe !important; color: #5b21b6 !important; }
+  .light .bg-indigo-700 { background-color: #4338ca !important; }
+  .light .bg-indigo-900 { background-color: #e0e7ff !important; color: #3730a3 !important; }
+  .light .bg-cyan-900 { background-color: #cffafe !important; color: #155e75 !important; }
+  .light .bg-orange-900 { background-color: #ffedd5 !important; color: #9a3412 !important; }
+  .light .bg-emerald-700 { background-color: #047857 !important; }
+
+  /* Light mode inputs */
+  .light input, .light select { 
+    background-color: #ffffff !important; 
+    border-color: #d0d5e0 !important; 
+    color: #1a2033 !important; 
+  }
+  .light input::placeholder { color: #7a859a !important; }
 }
 
 @layer components {

@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import { StakedSlip } from '../App';
 import ConfirmDialog from './ConfirmDialog';
 import { calculateAccuracy } from '../lib/accuracy';
+import MatchStatsModal from './MatchStatsModal';
 
 interface Props {
   history: StakedSlip[];
@@ -20,6 +21,7 @@ export default function SlipHistory({ history, onDelete, onClearAll, onExport, o
   const [filter, setFilter] = useState<Filter>('all');
   const [expandedSlip, setExpandedSlip] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [statsModal, setStatsModal] = useState<{ sel: any; result: 'pending' | 'won' | 'lost' } | null>(null);
   const [confirm, setConfirm] = useState<{
     open: boolean;
     title: string;
@@ -233,7 +235,23 @@ export default function SlipHistory({ history, onDelete, onClearAll, onExport, o
                           <tr key={sel.id} className="border-b border-gray-700 last:border-0">
                             <td className="py-1.5 text-gray-600 w-5">{selIdx + 1}</td>
                             <td className="py-1.5 text-gray-400">{sel.date} {sel.time}</td>
-                            <td className="py-1.5 text-gray-200">{sel.homeTeam} v {sel.awayTeam}</td>
+                            <td className="py-1.5 text-gray-200">
+                              <div
+                                className="cursor-pointer hover:bg-gray-750 rounded px-1 -mx-1"
+                                onClick={(e) => { e.stopPropagation(); setStatsModal({ sel, result: selResult }); }}
+                              >
+                                {sel.homeTeam} v {sel.awayTeam}
+                                {sel.score && sel.score.htHome !== undefined && (
+                                  <span className="ml-1.5 text-[10px] text-gray-400">(HT {sel.score.htHome}-{sel.score.htAway})</span>
+                                )}
+                                {sel.score && (
+                                  <span className="ml-1 text-[10px] text-blue-400 font-medium">FT {sel.score.home}-{sel.score.away}</span>
+                                )}
+                                {selResult === 'lost' && (
+                                  <span className="ml-1 text-[9px] text-red-500">← slip breaker</span>
+                                )}
+                              </div>
+                            </td>
                             <td className="py-1.5">
                               <span className={sel.odds > 1.5 ? 'text-yellow-400' : 'text-green-400'}>
                                 {sel.pick} @{sel.odds.toFixed(2)}
@@ -273,6 +291,15 @@ export default function SlipHistory({ history, onDelete, onClearAll, onExport, o
         }}
         onCancel={() => setConfirm(c => ({ ...c, open: false }))}
       />
+
+      {/* Match Stats Modal */}
+      {statsModal && (
+        <MatchStatsModal
+          selection={statsModal.sel}
+          selResult={statsModal.result}
+          onClose={() => setStatsModal(null)}
+        />
+      )}
     </div>
   );
 }

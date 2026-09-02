@@ -40,6 +40,27 @@ function findDuplicates(
   return { unique, duplicates };
 }
 
+/**
+ * Drop fixtures that have already kicked off. Past games never belong in the
+ * working set — they're removed at parse time, before any slip logic runs.
+ * 5-minute grace for clock skew / just-listed games.
+ */
+function dropStartedFixtures(selections: ParsedSelection[]): { future: ParsedSelection[]; dropped: number } {
+  const now = Date.now();
+  const GRACE_MS = 5 * 60 * 1000;
+  const future: ParsedSelection[] = [];
+  let dropped = 0;
+  for (const s of selections) {
+    const kickoff = s.kickOffDateTime ? new Date(s.kickOffDateTime).getTime() : NaN;
+    if (!isNaN(kickoff) && kickoff <= now - GRACE_MS) {
+      dropped++;
+    } else {
+      future.push(s);
+    }
+  }
+  return { future, dropped };
+}
+
 export default function PasteInput({ onParsed, onMerge, existingCount = 0 }: Props) {
   const [rawText, setRawText] = useState('');
   const [parseInfo, setParseInfo] = useState<{
@@ -50,6 +71,7 @@ export default function PasteInput({ onParsed, onMerge, existingCount = 0 }: Pro
     context: string;
     duplicatesFound?: number;
     uniqueAdded?: number;
+    pastDropped?: number;
   } | null>(null);
 
   function handleParse() {
@@ -57,17 +79,30 @@ export default function PasteInput({ onParsed, onMerge, existingCount = 0 }: Pro
 
     const result = parseSportyBet(rawText);
 
+    if (result.context === 'compact_unsupported') {
+      setParseInfo({
+        total: result.selections.length,
+        active: 0,
+        excluded: 0,
+        errors: result.errors,
+        context: result.context,
+      });
+      return;
+    }
+
+    // Strip already-started fixtures right here — never let them reach the slip logic
+    const { future, dropped } = dropStartedFixtures(result.activeSelections);
+
     setParseInfo({
       total: result.selections.length,
-      active: result.activeSelections.length,
+      active: future.length,
       excluded: result.selections.length - result.activeSelections.length,
       errors: result.errors,
       context: result.context,
+      pastDropped: dropped,
     });
 
-    if (result.context === 'compact_unsupported') return;
-
-    onParsed(result.activeSelections);
+    onParsed(future);
   }
 
   function handleMerge() {
@@ -86,16 +121,19 @@ export default function PasteInput({ onParsed, onMerge, existingCount = 0 }: Pro
       return;
     }
 
-    // onMerge handles dedup in App.tsx, but we show info here
+    // Strip already-started fixtures before merging
+    const { future, dropped } = dropStartedFixtures(result.activeSelections);
+
     setParseInfo({
       total: result.selections.length,
-      active: result.activeSelections.length,
+      active: future.length,
       excluded: result.selections.length - result.activeSelections.length,
       errors: result.errors,
       context: result.context,
+      pastDropped: dropped,
     });
 
-    onMerge(result.activeSelections);
+    onMerge(future);
   }
 
   function handleClear() {
@@ -205,6 +243,11 @@ export default function PasteInput({ onParsed, onMerge, existingCount = 0 }: Pro
                 Excluded: <span className="text-yellow-400 font-medium">{parseInfo.excluded}</span>
               </span>
             )}
+            {parseInfo.pastDropped !== undefined && parseInfo.pastDropped > 0 && (
+              <span className="text-gray-400">
+                Already started: <span className="text-orange-400 font-medium">{parseInfo.pastDropped}</span>
+              </span>
+            )}
             {parseInfo.duplicatesFound !== undefined && parseInfo.duplicatesFound > 0 && (
               <span className="text-gray-400">
                 Dupes skipped: <span className="text-orange-400 font-medium">{parseInfo.duplicatesFound}</span>
@@ -219,6 +262,11 @@ export default function PasteInput({ onParsed, onMerge, existingCount = 0 }: Pro
           {parseInfo.excluded > 0 && (
             <div className="mt-2 p-2 bg-yellow-900/30 border border-yellow-800 rounded text-xs text-yellow-300">
               {parseInfo.excluded} match(es) excluded — already settled, void, or live. Only "Not Started" matches are used.
+            </div>
+          )}
+          {parseInfo.pastDropped !== undefined && parseInfo.pastDropped > 0 && (
+            <div className="mt-2 p-2 bg-orange-900/30 border border-orange-800 rounded text-xs text-orange-300">
+              {parseInfo.pastDropped} fixture(s) removed automatically — kick-off time has already passed. Only upcoming games are kept.
             </div>
           )}
           {parseInfo.errors.length > 0 && (

@@ -3,6 +3,9 @@ import { StakedSlip } from '../App';
 import { Chain, ParsedSelection } from '../engine/types';
 import ConfirmDialog from './ConfirmDialog';
 import { formatSlipForClipboard, copyToClipboard } from '../lib/clipboard';
+import { fetchDayFixtures } from '../engine/flashscore';
+import { isSameTeam } from '../engine/team-aliases';
+import MatchStatsModal from './MatchStatsModal';
 
 interface Props {
   stakedSlips: StakedSlip[];
@@ -11,6 +14,7 @@ interface Props {
   onSlipLost: (slipId: string) => void;
   onSelectionResult: (slipId: string, selectionId: string, result: 'won' | 'lost') => void;
   onUndoStake: (slipId: string) => void;
+  onUpdateScores?: (updates: { slipId: string; selectionId: string; score: { home: number; away: number; htHome?: number; htAway?: number } }[]) => void;
 }
 
 // ─── Match Status Logic ──────────────────────────────────────────────────────
@@ -53,10 +57,13 @@ function getSlipSortKey(staked: StakedSlip): number {
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export default function ActiveSlips({ stakedSlips, chains, onSlipWon, onSlipLost, onSelectionResult, onUndoStake }: Props) {
+export default function ActiveSlips({ stakedSlips, chains, onSlipWon, onSlipLost, onSelectionResult, onUndoStake, onUpdateScores }: Props) {
   const [expandedSlip, setExpandedSlip] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [, setTick] = useState(0);
+  const [fetchingScores, setFetchingScores] = useState(false);
+  const [scoreStatus, setScoreStatus] = useState<string | null>(null);
+  const [statsModal, setStatsModal] = useState<{ sel: typeof stakedSlips[0]['slip']['selections'][0]; result: 'pending' | 'won' | 'lost' } | null>(null);
   const [confirm, setConfirm] = useState<{
     open: boolean;
     title: string;
@@ -71,6 +78,168 @@ export default function ActiveSlips({ stakedSlips, chains, onSlipWon, onSlipLost
     const interval = setInterval(() => setTick(t => t + 1), 30_000);
     return () => clearInterval(interval);
   }, [stakedSlips.length]);
+
+  // Auto-fetch scores on mount
+  useEffect(() => {
+    if (onUpdateScores) {
+      handleFetchScores();
+    }
+  }, []); // Only on mount
+
+  // Fuzzy team name matching — handles "Atletico Madrid" vs "Atl. Madrid", "Malaga CF" vs "Malaga" etc.
+  function fuzzyTeamMatch(a: string, b: string): boolean {
+    if (a === b) return true;
+    if (a.includes(b) || b.includes(a)) return true;
+    // Try first significant word (e.g. "Atletico" in "Atletico Madrid", "Malaga" in "Malaga CF")
+    const aWords = a.split(/[\s.]+/).filter(w => w.length > 2);
+    const bWords = b.split(/[\s.]+/).filter(w => w.length > 2);
+    // Check if the most distinctive word is shared
+    const aKey = aWords.find(w => w.length >= 4) || aWords[0] || '';
+    const bKey = bWords.find(w => w.length >= 4) || bWords[0] || '';
+    if (aKey && bKey) {
+      // "atletico" matches "atletico", "malaga" matches "malaga"
+      if (aKey === bKey) return true;
+      // "atletico" starts with "atl" — handle abbreviations
+      if (aKey.startsWith(bKey.substring(0, 3)) || bKey.startsWith(aKey.substring(0, 3))) {
+        // Verify at least one more word matches or second keyword overlaps
+        if (aWords.length > 1 && bWords.length > 1) {
+          return aWords.some(w => bWords.some(bw => bw.includes(w) || w.includes(bw)));
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async function handleFetchScores() {
+    if (!onUpdateScores) return;
+    setFetchingScores(true);
+    setScoreStatus('Fetching from Flashscore...');
+    try {
+      const { httpGetText } = await import('../lib/http');
+
+      // Step 1: Collect all day offsets needed
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const datesToFetch = new Set<number>();
+
+      for (const staked of stakedSlips) {
+        for (const sel of staked.slip.selections) {
+          const kickoff = new Date(sel.kickOffDateTime).getTime();
+          if (kickoff > Date.now()) continue; // skip future
+          const kickoffDate = new Date(sel.kickOffDateTime);
+          kickoffDate.setHours(0, 0, 0, 0);
+          const offset = Math.round((kickoffDate.getTime() - today.getTime()) / (24 * 60 * 60 * 1000));
+          datesToFetch.add(offset);
+        }
+      }
+
+      if (datesToFetch.size === 0) {
+        setScoreStatus('No matches to update');
+        setFetchingScores(false);
+        setTimeout(() => setScoreStatus(null), 3000);
+        return;
+      }
+
+      // Step 2: Fetch Flashscore day pages to get matchIds + FT scores
+      setScoreStatus(`Loading ${datesToFetch.size} day(s)...`);
+      const allFS: { homeTeam: string; awayTeam: string; score: string; matchId: string }[] = [];
+      for (const offset of datesToFetch) {
+        try {
+          const fixtures = await fetchDayFixtures(offset);
+          for (const f of fixtures) {
+            if (f.isFinished && f.score) {
+              allFS.push({ homeTeam: f.homeTeam, awayTeam: f.awayTeam, score: f.score, matchId: f.matchId });
+            }
+          }
+        } catch {}
+      }
+
+      setScoreStatus(`Found ${allFS.length} finished matches. Matching...`);
+
+      // Step 3: Match each selection to a Flashscore fixture
+      type ScoreUpdate = { slipId: string; selectionId: string; matchId: string; ftHome: number; ftAway: number };
+      const matched: ScoreUpdate[] = [];
+
+      for (const staked of stakedSlips) {
+        for (const sel of staked.slip.selections) {
+          const kickoff = new Date(sel.kickOffDateTime).getTime();
+          if (kickoff > Date.now()) continue;
+          // Skip if already has HT (fully resolved)
+          if (sel.score?.htHome !== undefined) continue;
+
+          const fsMatch = allFS.find(f => {
+            if (isSameTeam(sel.homeTeam, f.homeTeam) && isSameTeam(sel.awayTeam, f.awayTeam)) return true;
+            return fuzzyTeamMatch(
+              sel.homeTeam.toLowerCase().replace(/\s*(fc|cf|sc|ac|cd|ud)$/i, '').trim(),
+              f.homeTeam.toLowerCase().replace(/\s*(fc|cf|sc|ac|cd|ud)$/i, '').trim()
+            ) && fuzzyTeamMatch(
+              sel.awayTeam.toLowerCase().replace(/\s*(fc|cf|sc|ac|cd|ud)$/i, '').trim(),
+              f.awayTeam.toLowerCase().replace(/\s*(fc|cf|sc|ac|cd|ud)$/i, '').trim()
+            );
+          });
+
+          if (fsMatch) {
+            const parts = fsMatch.score.split('-').map(Number);
+            if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+              matched.push({ slipId: staked.slip.id, selectionId: sel.id, matchId: fsMatch.matchId, ftHome: parts[0], ftAway: parts[1] });
+            }
+          }
+        }
+      }
+
+      if (matched.length === 0) {
+        setScoreStatus('No matches found on Flashscore');
+        setFetchingScores(false);
+        setTimeout(() => setScoreStatus(null), 4000);
+        return;
+      }
+
+      // Step 4: For each matched fixture, fetch the detail page to get HT score
+      setScoreStatus(`Fetching HT for ${matched.length} matches...`);
+      const finalUpdates: { slipId: string; selectionId: string; score: { home: number; away: number; htHome?: number; htAway?: number } }[] = [];
+
+      for (const m of matched) {
+        let htHome: number | undefined;
+        let htAway: number | undefined;
+
+        try {
+          const res = await httpGetText(`https://www.flashscore.mobi/match/${m.matchId}/`, {});
+          if (res.text && res.text.length > 500) {
+            // Try format: <b>3-0</b>  (2-0,1-0) — parentheses contain (HT, 2ndHalf)
+            const htMatch = res.text.match(/<div class="detail"><b>\d+-\d+<\/b>\s*\((\d+)-(\d+),\d+-\d+\)/);
+            if (htMatch) {
+              htHome = parseInt(htMatch[1]);
+              htAway = parseInt(htMatch[2]);
+            } else {
+              // Try: <h4>1st Half: <b>0-0</b></h4>
+              const halfMatch = res.text.match(/1st Half:\s*<b>(\d+)-(\d+)<\/b>/);
+              if (halfMatch) {
+                htHome = parseInt(halfMatch[1]);
+                htAway = parseInt(halfMatch[2]);
+              }
+            }
+          }
+        } catch {}
+
+        finalUpdates.push({
+          slipId: m.slipId,
+          selectionId: m.selectionId,
+          score: { home: m.ftHome, away: m.ftAway, htHome, htAway },
+        });
+      }
+
+      if (finalUpdates.length > 0) {
+        onUpdateScores(finalUpdates);
+        setScoreStatus(`Updated ${finalUpdates.length} match${finalUpdates.length > 1 ? 'es' : ''}`);
+      }
+    } catch (e) {
+      setScoreStatus('Fetch failed');
+      console.error('[LiveScores]', e);
+    }
+    setFetchingScores(false);
+    setTimeout(() => setScoreStatus(null), 4000);
+  }
 
   function askConfirm(title: string, message: string, action: () => void, variant: 'danger' | 'warning' | 'info' = 'danger') {
     setConfirm({ open: true, title, message, action, variant });
@@ -104,18 +273,30 @@ export default function ActiveSlips({ stakedSlips, chains, onSlipWon, onSlipLost
 
   return (
     <div>
-      <h2 className="text-lg font-bold mb-4 text-blue-400">
-        Active Slips ({stakedSlips.length})
-        {liveCount > 0 && (
-          <span className="ml-2 inline-flex items-center gap-1 text-sm font-normal">
-            <span className="relative flex h-2.5 w-2.5">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500"></span>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-lg font-bold text-blue-400">
+          Active Slips ({stakedSlips.length})
+          {liveCount > 0 && (
+            <span className="ml-2 inline-flex items-center gap-1 text-sm font-normal">
+              <span className="relative flex h-2.5 w-2.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500"></span>
+              </span>
+              <span className="text-green-400">{liveCount} LIVE</span>
             </span>
-            <span className="text-green-400">{liveCount} LIVE</span>
-          </span>
-        )}
-      </h2>
+          )}
+        </h2>
+        <div className="flex items-center gap-2">
+          {scoreStatus && <span className="text-[10px] text-blue-400">{scoreStatus}</span>}
+          <button
+            onClick={handleFetchScores}
+            disabled={fetchingScores}
+            className="px-2 py-1 bg-indigo-700 hover:bg-indigo-600 disabled:bg-gray-600 rounded text-[10px] font-medium text-white"
+          >
+            {fetchingScores ? 'Fetching...' : 'Live Scores'}
+          </button>
+        </div>
+      </div>
 
       {/* Bulk settle actions for ended slips */}
       {endedSlips.length > 0 && (
@@ -303,7 +484,9 @@ export default function ActiveSlips({ stakedSlips, chains, onSlipWon, onSlipLost
                   <p className="text-xs text-gray-500 mb-2">Mark each match individually. One loss = slip lost.</p>
                   <table className="w-full text-xs">
                     <tbody>
-                      {staked.slip.selections.map((sel, selIdx) => {
+                      {[...staked.slip.selections]
+                        .sort((a, b) => new Date(a.kickOffDateTime).getTime() - new Date(b.kickOffDateTime).getTime())
+                        .map((sel, selIdx) => {
                         const selResult = staked.selectionResults[sel.id];
                         const status = getMatchStatus(sel, selResult);
 
@@ -327,15 +510,26 @@ export default function ActiveSlips({ stakedSlips, chains, onSlipWon, onSlipLost
                               {sel.date} {sel.time}
                             </td>
                             <td className="py-2">
-                              <span className="text-gray-200">{sel.homeTeam}</span>
-                              <span className="text-gray-500"> v </span>
-                              <span className="text-gray-200">{sel.awayTeam}</span>
-                              {status === 'live' && (
-                                <span className="ml-1.5 text-xs text-green-400 font-medium">LIVE</span>
-                              )}
-                              {status === 'ended' && (
-                                <span className="ml-1.5 text-xs text-yellow-400 font-medium">FT</span>
-                              )}
+                              <div
+                                className="cursor-pointer hover:bg-gray-750 rounded px-1 -mx-1"
+                                onClick={(e) => { e.stopPropagation(); setStatsModal({ sel, result: selResult }); }}
+                              >
+                                <span className="text-gray-200">{sel.homeTeam}</span>
+                                <span className="text-gray-500"> v </span>
+                                <span className="text-gray-200">{sel.awayTeam}</span>
+                                {status === 'live' && (
+                                  <span className="ml-1.5 text-xs text-green-400 font-medium">LIVE</span>
+                                )}
+                                {status === 'ended' && !sel.score && (
+                                  <span className="ml-1.5 text-xs text-yellow-400 font-medium">FT</span>
+                                )}
+                                {sel.score && sel.score.htHome !== undefined && (
+                                  <span className="ml-1.5 text-[10px] text-gray-400">HT {sel.score.htHome}-{sel.score.htAway}</span>
+                                )}
+                                {sel.score && (
+                                  <span className="ml-1 text-[10px] font-bold text-blue-400">FT {sel.score.home}-{sel.score.away}</span>
+                                )}
+                              </div>
                             </td>
                             <td className="py-2">
                               <span className={sel.odds > 1.5 ? 'text-yellow-400' : 'text-green-400'}>
@@ -424,6 +618,15 @@ export default function ActiveSlips({ stakedSlips, chains, onSlipWon, onSlipLost
         }}
         onCancel={() => setConfirm(c => ({ ...c, open: false }))}
       />
+
+      {/* Match Stats Modal */}
+      {statsModal && (
+        <MatchStatsModal
+          selection={statsModal.sel}
+          selResult={statsModal.result}
+          onClose={() => setStatsModal(null)}
+        />
+      )}
     </div>
   );
 }

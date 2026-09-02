@@ -28,6 +28,7 @@ import { getAllUpcomingEvents as getEspnEvents } from './espn';
 import { getFixturesForDays, getApiKey as getApiFootballKey, TOP_LEAGUES } from './api-football';
 import { getUpcomingFixtures, getKickoffApiKey, KICKOFF_LEAGUES } from './kickoff-api';
 import { fetchLeagueStats, getCachedTeamStats } from './stats-calculator';
+import { fetchSkySportsFixtures } from './skysports';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -48,6 +49,7 @@ export interface OrchestratorConfig {
   useEspn: boolean;
   useApiFootball: boolean;
   useKickoffApi: boolean;
+  useSkySports?: boolean;
 }
 
 export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
@@ -57,6 +59,7 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
   useEspn: true,
   useApiFootball: true,
   useKickoffApi: true,
+  useSkySports: true,
 };
 
 // ─── Main Orchestrator ───────────────────────────────────────────────────────
@@ -107,6 +110,30 @@ export async function fetchAllProviders(
       } catch (e: any) {
         providersFailed.push('TheSportsDB');
         errors['TheSportsDB'] = e.message || 'Unknown error';
+      }
+    })());
+  }
+
+  if (config.useSkySports !== false) {
+    fetches.push((async () => {
+      try {
+        const sky = await fetchSkySportsFixtures();
+        const fixtures: ProviderFixture[] = sky.map(f => ({
+          homeTeam: f.homeTeam,
+          awayTeam: f.awayTeam,
+          kickOff: f.kickOffDate ? f.kickOffDate.toISOString() : '',
+          league: f.league,
+          leagueCode: '',
+        })).filter(f => f.homeTeam && f.awayTeam);
+
+        if (fixtures.length > 0) {
+          providerResults.push({ provider: 'SkySports', fixtures });
+          providersUsed.push('SkySports');
+          totalFromEach['SkySports'] = fixtures.length;
+        }
+      } catch (e: any) {
+        providersFailed.push('SkySports');
+        errors['SkySports'] = e.message || 'Unknown error';
       }
     })());
   }
@@ -211,7 +238,9 @@ export async function fetchAllProviders(
   if (config.useEspn) {
     fetches.push((async () => {
       try {
-        const events = await getEspnEvents(undefined, config.days);
+        // Limit ESPN to Tier 1 leagues and max 3 days for speed
+        const espnDays = Math.min(config.days, 3);
+        const events = await getEspnEvents(undefined, espnDays);
         const fixtures: ProviderFixture[] = events.map((e: any) => ({
           homeTeam: e.homeTeam || '',
           awayTeam: e.awayTeam || '',
@@ -284,6 +313,9 @@ export function getProviderStatus(): Record<string, { available: boolean; reason
     },
     'TheSportsDB': { available: true }, // Always available (no key needed)
     'ESPN': { available: true }, // Always available (no key needed)
+    'SkySports': { available: true }, // HTML scrape, no key
+    'OddsMeter': { available: true }, // HTML scrape, odds + implied %, no key
+    'Flashscore': { available: true }, // HTML scrape (mirrors), no key
     'API-Football': {
       available: !!getApiFootballKey(),
       reason: !getApiFootballKey() ? 'API key not set' : undefined,

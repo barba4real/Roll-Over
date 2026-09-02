@@ -1,10 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { httpGet, getProxyUrl, setProxyUrl } from '../lib/http';
+import { httpGet, httpGetDirect, httpGetHtml, getProxyUrl, setProxyUrl, isProxyEnabled, setProxyEnabled } from '../lib/http';
 import { setFootballDataKey } from '../engine/football-data-org';
-import { setApiKey } from '../engine/api-football';
-import { setOddsApiKey } from '../engine/odds-api';
-import { setKickoffApiKey } from '../engine/kickoff-api';
 import { setSportmonksToken } from '../engine/sportmonks';
 
 interface Props {
@@ -32,6 +29,7 @@ interface TestResult {
 }
 
 const PROVIDERS: ProviderConfig[] = [
+  // ─── Free providers (no key needed) ────────────────────────────────────────
   {
     id: 'thesportsdb',
     name: 'TheSportsDB',
@@ -46,13 +44,13 @@ const PROVIDERS: ProviderConfig[] = [
   {
     id: 'espn',
     name: 'ESPN',
-    needsKey: true,
-    storageKey: 'rollover_espn_proxy_url',
-    description: 'Fixtures + live scores. Geo-restricted directly. Set your Cloudflare Worker proxy URL to bypass.',
+    needsKey: false,
+    storageKey: '',
+    description: 'Fixtures + live scores for 55 leagues via CDN endpoint. No geo-restrictions.',
     registerUrl: '',
-    testEndpoint: '', // Built dynamically
-    testHeaders: () => ({ 'Accept': 'application/json' }),
-    rateLimit: 'Unlimited (via proxy)',
+    testEndpoint: 'https://cdn.espn.com/core/soccer/scoreboard?xhr=1&league=eng.1',
+    testHeaders: () => ({}),
+    rateLimit: 'Unlimited',
   },
   {
     id: 'openligadb',
@@ -66,16 +64,72 @@ const PROVIDERS: ProviderConfig[] = [
     rateLimit: 'Unlimited',
   },
   {
-    id: 'sportscore',
-    name: 'SportScore',
+    id: 'skysports',
+    name: 'Sky Sports',
     needsKey: false,
     storageKey: '',
-    description: 'Live scores fallback via Football-Data enrichment. No key needed.',
+    description: 'Fixtures + kickoff times for major leagues worldwide. HTML, no key.',
     registerUrl: '',
-    testEndpoint: 'https://www.thesportsdb.com/api/v1/json/3/all_sports.php',
+    testEndpoint: 'https://www.skysports.com/football/fixtures',
+    testHeaders: () => ({ 'Accept': 'text/html' }),
+    rateLimit: 'Unlimited',
+  },
+  {
+    id: 'oddsmeter',
+    name: 'OddsMeter',
+    needsKey: false,
+    storageKey: '',
+    description: 'Market 1X2 odds + implied win probabilities. Cross-checks your picks. No key.',
+    registerUrl: '',
+    testEndpoint: 'https://oddsmeter.com/today-odds-list.aspx',
+    testHeaders: () => ({ 'Accept': 'text/html' }),
+    rateLimit: 'Unlimited',
+  },
+  {
+    id: 'flashscore',
+    name: 'Flashscore',
+    needsKey: false,
+    storageKey: '',
+    description: 'Fixtures, H2H, results across 1000+ leagues. Auto-mirrors (.mobi/.ng/.au). No key.',
+    registerUrl: '',
+    testEndpoint: 'https://www.flashscore.mobi/?d=0&s=1',
+    testHeaders: () => ({ 'Accept': 'text/html' }),
+    rateLimit: 'Unlimited',
+  },
+  {
+    id: 'openfootball',
+    name: 'OpenFootball',
+    needsKey: false,
+    storageKey: '',
+    description: 'Current season fixtures + results from GitHub. 16 leagues, JSON format.',
+    registerUrl: '',
+    testEndpoint: 'https://raw.githubusercontent.com/openfootball/football.json/master/2024-25/en.1.json',
     testHeaders: () => ({}),
     rateLimit: 'Unlimited',
   },
+  {
+    id: 'footballdatauk',
+    name: 'Football-Data UK',
+    needsKey: false,
+    storageKey: '',
+    description: '30 years historical results (CSV). 17 leagues. Powers the prediction engine.',
+    registerUrl: '',
+    testEndpoint: 'https://www.football-data.co.uk/mmz4281/2526/E0.csv',
+    testHeaders: () => ({}),
+    rateLimit: 'Unlimited',
+  },
+  {
+    id: 'statsbomb',
+    name: 'StatsBomb',
+    needsKey: false,
+    storageKey: '',
+    description: 'xG data, advanced match events. La Liga, UCL, Bundesliga, EPL (select seasons).',
+    registerUrl: '',
+    testEndpoint: 'https://raw.githubusercontent.com/statsbomb/open-data/master/data/competitions.json',
+    testHeaders: () => ({}),
+    rateLimit: 'Unlimited',
+  },
+  // ─── Key-based providers ───────────────────────────────────────────────────
   {
     id: 'footballdata',
     name: 'Football-Data.org',
@@ -86,28 +140,6 @@ const PROVIDERS: ProviderConfig[] = [
     testEndpoint: 'https://api.football-data.org/v4/competitions',
     testHeaders: (key) => ({ 'X-Auth-Token': key, 'Accept': 'application/json' }),
     rateLimit: '10 req/min',
-  },
-  {
-    id: 'apifootball',
-    name: 'API-Football',
-    needsKey: true,
-    storageKey: 'rollover_api_football_key',
-    description: 'AI predictions + team statistics. Most comprehensive paid source.',
-    registerUrl: 'https://dashboard.api-football.com/register',
-    testEndpoint: 'https://v3.football.api-sports.io/status',
-    testHeaders: (key) => ({ 'x-apisports-key': key, 'Accept': 'application/json' }),
-    rateLimit: '100 req/day',
-  },
-  {
-    id: 'kickoffapi',
-    name: 'KickoffAPI',
-    needsKey: true,
-    storageKey: 'rollover_kickoff_api_key',
-    description: 'Team stats + H2H + predictions. Good for head-to-head data.',
-    registerUrl: 'https://kickoffapi.com/',
-    testEndpoint: 'https://api.kickoffapi.com/api/v1/sports',
-    testHeaders: (key) => ({ 'x-api-key': key, 'Accept': 'application/json' }),
-    rateLimit: '100 req/day',
   },
   {
     id: 'sportmonks',
@@ -121,15 +153,15 @@ const PROVIDERS: ProviderConfig[] = [
     rateLimit: 'Free tier',
   },
   {
-    id: 'oddsapi',
-    name: 'The Odds API',
+    id: 'allsportdb',
+    name: 'AllSportDB',
     needsKey: true,
-    storageKey: 'rollover_odds_api_key',
-    description: 'Market odds from 40+ bookmakers. Value detection engine.',
-    registerUrl: 'https://the-odds-api.com/',
+    storageKey: 'rollover_allsportdb_key',
+    description: 'Event discovery worldwide. 10,000 calls/month free. Auto-renewable key.',
+    registerUrl: 'https://allsportdb.com/Api',
     testEndpoint: '', // Built dynamically with key
     testHeaders: () => ({ 'Accept': 'application/json' }),
-    rateLimit: '500 req/month',
+    rateLimit: '10K req/month',
   },
 ];
 
@@ -154,6 +186,10 @@ export default function ApiSettingsModal({ open, onClose }: Props) {
     }
     // Load global proxy URL
     loaded._proxy = getProxyUrl() || '';
+    loaded._proxyEnabled = isProxyEnabled() ? 'true' : 'false';
+    // Load Telegram config
+    loaded._telegramToken = localStorage.getItem('rollover_telegram_bot_token') || '';
+    loaded._telegramChat = localStorage.getItem('rollover_telegram_chat_id') || '';
     setKeys(loaded);
 
     // Load cached test results
@@ -164,15 +200,9 @@ export default function ApiSettingsModal({ open, onClose }: Props) {
   }, [open]);
 
   function handleSave() {
-    // Save global proxy URL
+    // Save global proxy URL and enabled state
     setProxyUrl(keys._proxy || '');
-
-    // Save ESPN proxy URL
-    if (keys.espn) {
-      localStorage.setItem('rollover_espn_proxy_url', keys.espn);
-    } else {
-      localStorage.removeItem('rollover_espn_proxy_url');
-    }
+    setProxyEnabled(keys._proxyEnabled === 'true');
 
     // Save Football-Data.org
     if (keys.footballdata) {
@@ -180,22 +210,6 @@ export default function ApiSettingsModal({ open, onClose }: Props) {
       localStorage.setItem('rollover_footballdata_key', keys.footballdata);
     } else {
       localStorage.removeItem('rollover_footballdata_key');
-    }
-
-    // Save API-Football
-    if (keys.apifootball) {
-      setApiKey(keys.apifootball);
-      localStorage.setItem('rollover_api_football_key', keys.apifootball);
-    } else {
-      localStorage.removeItem('rollover_api_football_key');
-    }
-
-    // Save KickoffAPI
-    if (keys.kickoffapi) {
-      setKickoffApiKey(keys.kickoffapi);
-      localStorage.setItem('rollover_kickoff_api_key', keys.kickoffapi);
-    } else {
-      localStorage.removeItem('rollover_kickoff_api_key');
     }
 
     // Save Sportmonks
@@ -206,13 +220,18 @@ export default function ApiSettingsModal({ open, onClose }: Props) {
       localStorage.removeItem('rollover_sportmonks_token');
     }
 
-    // Save Odds-API
-    if (keys.oddsapi) {
-      setOddsApiKey(keys.oddsapi);
-      localStorage.setItem('rollover_odds_api_key', keys.oddsapi);
+    // Save AllSportDB
+    if (keys.allsportdb) {
+      localStorage.setItem('rollover_allsportdb_key', keys.allsportdb);
     } else {
-      localStorage.removeItem('rollover_odds_api_key');
+      localStorage.removeItem('rollover_allsportdb_key');
     }
+
+    // Save Telegram config
+    if (keys._telegramToken) localStorage.setItem('rollover_telegram_bot_token', keys._telegramToken);
+    else localStorage.removeItem('rollover_telegram_bot_token');
+    if (keys._telegramChat) localStorage.setItem('rollover_telegram_chat_id', keys._telegramChat);
+    else localStorage.removeItem('rollover_telegram_chat_id');
 
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
@@ -226,27 +245,18 @@ export default function ApiSettingsModal({ open, onClose }: Props) {
       let url = provider.testEndpoint;
       let headers = provider.testHeaders(keys[provider.id] || '');
 
-      // Special case: ESPN — test via proxy if configured, otherwise direct
-      if (provider.id === 'espn') {
-        const proxyUrl = keys.espn || localStorage.getItem('rollover_espn_proxy_url') || '';
-        if (proxyUrl) {
-          url = `${proxyUrl.replace(/\/$/, '')}/eng.1/scoreboard`;
-        } else {
-          url = 'https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard';
-        }
-      }
-
-      // Special case: Odds-API needs key in URL
-      if (provider.id === 'oddsapi') {
-        const key = keys.oddsapi || localStorage.getItem('rollover_odds_api_key') || '';
+      // Special case: AllSportDB uses Bearer token auth
+      if (provider.id === 'allsportdb') {
+        const key = keys.allsportdb || localStorage.getItem('rollover_allsportdb_key') || '';
         if (!key) {
           setTestResults(prev => ({
             ...prev,
-            [provider.id]: { status: 'failed', error: 'No API key configured' },
+            [provider.id]: { status: 'failed', error: 'No API key configured. Sign up at allsportdb.com/Api' },
           }));
           return;
         }
-        url = `https://api.the-odds-api.com/v4/sports?apiKey=${key}`;
+        url = 'https://api.allsportdb.com/v3/sports?name=Football';
+        headers = { 'Authorization': `Bearer ${key}`, 'Accept': 'application/json' };
       }
 
       // Special case: Sportmonks uses token as query param
@@ -262,8 +272,8 @@ export default function ApiSettingsModal({ open, onClose }: Props) {
         url = `https://api.sportmonks.com/v3/football/leagues?api_token=${key}`;
       }
 
-      // For key-based providers without a key, fail early (except ESPN and Odds-API which handle keys differently)
-      if (provider.needsKey && provider.id !== 'oddsapi' && provider.id !== 'sportmonks' && provider.id !== 'espn') {
+      // For key-based providers without a key, fail early
+      if (provider.needsKey && provider.id !== 'allsportdb' && provider.id !== 'sportmonks') {
         const key = keys[provider.id] || '';
         if (!key) {
           setTestResults(prev => ({
@@ -274,21 +284,76 @@ export default function ApiSettingsModal({ open, onClose }: Props) {
         }
       }
 
-      const result: any = await httpGet(url, headers);
+      // Special case: football-data.co.uk returns CSV, not JSON — use text fetch
+      if (provider.id === 'footballdatauk') {
+        try {
+          const { httpGetText } = await import('../lib/http');
+          const textResult = await httpGetText(url, {});
+          const latency = Date.now() - startTime;
+          if (textResult.text && textResult.text.length > 100 && textResult.text.includes('HomeTeam')) {
+            setTestResults(prev => ({
+              ...prev,
+              [provider.id]: { status: 'success', latency, testedAt: Date.now() },
+            }));
+          } else {
+            setTestResults(prev => ({
+              ...prev,
+              [provider.id]: { status: 'failed', error: 'Unexpected response format', latency, testedAt: Date.now() },
+            }));
+          }
+        } catch (e: any) {
+          setTestResults(prev => ({
+            ...prev,
+            [provider.id]: { status: 'failed', error: e?.message || 'Connection failed', latency: Date.now() - startTime, testedAt: Date.now() },
+          }));
+        }
+        return;
+      }
+
+      // HTML-scraping providers: test via httpGetHtml (returns { text, status })
+      const htmlProviders = ['skysports', 'oddsmeter', 'flashscore'];
+      if (htmlProviders.includes(provider.id)) {
+        const htmlRes = await httpGetHtml(url, headers);
+        const latency = Date.now() - startTime;
+        if (htmlRes.text && htmlRes.length > 500) {
+          setTestResults(prev => ({
+            ...prev,
+            [provider.id]: { status: 'success', latency, testedAt: Date.now() },
+          }));
+        } else {
+          setTestResults(prev => ({
+            ...prev,
+            [provider.id]: { status: 'failed', error: 'Empty or blocked response', latency, testedAt: Date.now() },
+          }));
+        }
+        return;
+      }
+
+      // Free providers use direct request (bypass proxy — these all work directly)
+      // AllSportDB also uses direct (api.allsportdb.com works directly)
+      const useDirectRequest = !provider.needsKey || provider.id === 'allsportdb';
+      const result: any = useDirectRequest
+        ? await httpGetDirect(url, headers)
+        : await httpGet(url, headers);
       const latency = Date.now() - startTime;
 
       // Check if result indicates an error
-      const isError =
-        result?.error ||
-        result?.message?.toLowerCase().includes('unauthorized') ||
-        result?.message?.toLowerCase().includes('forbidden') ||
-        (typeof result === 'string' && result.includes('error'));
+      // Be careful: some APIs return { errors: {} } on success (API-Football)
+      // Only flag as error if there's a clear failure signal
+      const errorMessage = 
+        (typeof result?.error === 'string' && result.error) ||
+        (result?.message && (
+          result.message.toLowerCase().includes('unauthorized') ||
+          result.message.toLowerCase().includes('forbidden') ||
+          result.message.toLowerCase().includes('invalid') ||
+          result.message.toLowerCase().includes('denied')
+        ) ? result.message : null) ||
+        (typeof result === 'string' && result.includes('Access Denied') ? 'Access Denied' : null);
 
-      if (isError) {
-        const errorMsg = result?.error || result?.message || 'Authentication failed';
+      if (errorMessage) {
         setTestResults(prev => ({
           ...prev,
-          [provider.id]: { status: 'failed', error: errorMsg, latency, testedAt: Date.now() },
+          [provider.id]: { status: 'failed', error: errorMessage, latency, testedAt: Date.now() },
         }));
       } else {
         setTestResults(prev => ({
@@ -390,13 +455,33 @@ export default function ApiSettingsModal({ open, onClose }: Props) {
         <div className="flex-1 overflow-y-auto p-6">
           {/* Global Proxy URL */}
           <div className="mb-6 p-4 bg-blue-900/20 border border-blue-800 rounded-lg">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="w-2 h-2 rounded-full bg-blue-500"></span>
-              <h3 className="text-sm font-medium text-blue-400">Cloudflare Worker Proxy (Recommended)</h3>
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-blue-500"></span>
+                <h3 className="text-sm font-medium text-blue-400">Cloudflare Worker Proxy</h3>
+              </div>
+              {/* Enable/Disable Toggle */}
+              <label className="flex items-center gap-2 cursor-pointer">
+                <span className="text-xs text-gray-400">{keys._proxyEnabled ? 'Enabled' : 'Disabled'}</span>
+                <div className="relative">
+                  <input
+                    type="checkbox"
+                    checked={keys._proxyEnabled === 'true' || (keys._proxyEnabled === undefined && !!keys._proxy)}
+                    onChange={(e) => {
+                      const enabled = e.target.checked;
+                      setKeys(prev => ({ ...prev, _proxyEnabled: enabled ? 'true' : 'false' }));
+                      setProxyEnabled(enabled);
+                    }}
+                    className="sr-only peer"
+                  />
+                  <div className="w-9 h-5 bg-gray-700 peer-checked:bg-blue-600 rounded-full transition-colors"></div>
+                  <div className="absolute left-0.5 top-0.5 w-4 h-4 bg-gray-300 peer-checked:translate-x-4 rounded-full transition-transform"></div>
+                </div>
+              </label>
             </div>
             <p className="text-xs text-gray-400 mb-3">
-              Routes ALL API requests through Cloudflare's global network. Bypasses geo-restrictions and ISP blocks.
-              Deploy the worker from <span className="font-mono text-blue-300">worker/api-proxy.js</span> to your Cloudflare account.
+              Routes API requests through Cloudflare's global network. Bypasses geo-restrictions and ISP blocks.
+              ESPN works directly without proxy. Toggle off if other providers also work directly.
             </p>
             <div className="flex gap-2">
               <input
@@ -573,6 +658,52 @@ export default function ApiSettingsModal({ open, onClose }: Props) {
                   </div>
                 );
               })}
+            </div>
+          </div>
+
+          {/* Telegram Bot Section */}
+          <div className="mt-6 p-4 bg-indigo-900/20 border border-indigo-800 rounded-lg">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="w-2 h-2 rounded-full bg-indigo-500"></span>
+              <h3 className="text-sm font-medium text-indigo-400">Telegram Bot (Send Daily Picks)</h3>
+            </div>
+            <p className="text-xs text-gray-400 mb-3">
+              Send your top predictions to a Telegram channel. Create a bot via @BotFather, get the token, and add the bot to your channel.
+            </p>
+            <div className="space-y-2">
+              <input
+                type="text"
+                placeholder="Bot Token (from @BotFather)"
+                value={keys._telegramToken || ''}
+                onChange={(e) => setKeys(prev => ({ ...prev, _telegramToken: e.target.value }))}
+                className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm text-gray-300 focus:outline-none focus:border-indigo-500 font-mono"
+              />
+              <input
+                type="text"
+                placeholder="Chat ID or @channel_name"
+                value={keys._telegramChat || ''}
+                onChange={(e) => setKeys(prev => ({ ...prev, _telegramChat: e.target.value }))}
+                className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-sm text-gray-300 focus:outline-none focus:border-indigo-500 font-mono"
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={async () => {
+                    const { setTelegramConfig, testConnection } = await import('../engine/telegram-bot');
+                    setTelegramConfig(keys._telegramToken || '', keys._telegramChat || '');
+                    const result = await testConnection();
+                    if (result.ok) {
+                      setTestResults(prev => ({ ...prev, _telegram: { status: 'success', testedAt: Date.now() } }));
+                    } else {
+                      setTestResults(prev => ({ ...prev, _telegram: { status: 'failed', error: result.error } }));
+                    }
+                  }}
+                  className="px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 rounded text-xs font-medium text-white"
+                >
+                  Test Bot
+                </button>
+                {testResults._telegram?.status === 'success' && <span className="text-xs text-green-400 self-center">Connected</span>}
+                {testResults._telegram?.status === 'failed' && <span className="text-xs text-red-400 self-center">{testResults._telegram.error}</span>}
+              </div>
             </div>
           </div>
 

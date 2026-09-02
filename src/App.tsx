@@ -6,19 +6,24 @@ import SelectionList from './components/SelectionList';
 import SlipGenerator from './components/SlipGenerator';
 import ChainsWidget from './components/ChainsWidget';
 import ApiSettingsModal from './components/ApiSettingsModal';
+import AccuracyDashboard from './components/AccuracyDashboard';
+import MatchAnalysis from './components/MatchAnalysis';
 import GeneratedSlips from './components/GeneratedSlips';
 import ActiveSlips from './components/ActiveSlips';
 import SlipHistory from './components/SlipHistory';
 import MatchScout from './components/MatchScout';
 import MatchSearch from './components/MatchSearch';
+import FoulsStrategy from './components/FoulsStrategy';
 import { ParsedSelection, Slip, Chain } from './engine/types';
 import { parseSportyBet } from './engine/parser-sportybet';
 import { saveStakedSlips, loadStakedSlips, saveHistory, loadHistory, saveChains, loadChains, loadSettings, saveSettings, AppSettings, exportAllData, importAllData, saveSelections, loadSelections, exportSelections, importSelections, saveGeneratedSlips, loadGeneratedSlips, evictIfNeeded } from './lib/storage';
 import { quickScore, ScoringResult, scorePick, scorePickEnhanced, buildPersonalHistory } from './engine/scoring';
 import { buildMatchDataFromCache } from './engine/stats-calculator';
-import { suggestBestSlip } from './engine/grouping-engine';
+import { suggestBestSlip, calculateQuality, DEFAULT_CONFIG } from './engine/grouping-engine';
 import { recordPrediction, buildInputsFromMatchData, recordOutcome } from './engine/prediction-log';
 import { checkAndSettle, shouldPoll } from './engine/auto-settle';
+import { getLiveMatches, findMatchResult } from './engine/sportscore';
+import { fetchTodayFinished, fetchYesterdayResults } from './engine/flashscore';
 
 export interface StakedSlip {
   slip: Slip;
@@ -30,7 +35,7 @@ export interface StakedSlip {
   label: string; // User-defined name/note for this slip
 }
 
-type View = 'home' | 'paste' | 'search' | 'slips' | 'history';
+type View = 'home' | 'paste' | 'search' | 'slips' | 'history' | 'fouls';
 
 export default function App() {
   const [view, setView] = useState<View>('home');
@@ -42,6 +47,32 @@ export default function App() {
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [statsVersion, setStatsVersion] = useState(0); // Incremented when new stats are cached
   const [showApiSettings, setShowApiSettings] = useState(false);
+  const [showScout, setShowScout] = useState(() => {
+    const v = localStorage.getItem('rollover_show_scout');
+    return v === null ? true : v === 'true';
+  });
+  const [showGenerated, setShowGenerated] = useState(() => {
+    const v = localStorage.getItem('rollover_show_generated');
+    return v === null ? true : v === 'true';
+  });
+  const [showAccuracy, setShowAccuracy] = useState(false);
+  const [analyzeFixture, setAnalyzeFixture] = useState<{ home: string; away: string; league: string } | null>(null);
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    const saved = localStorage.getItem('rollover_theme');
+    return (saved === 'light') ? 'light' : 'dark';
+  });
+
+  // Apply theme class to document
+  useEffect(() => {
+    if (theme === 'light') {
+      document.documentElement.classList.add('light');
+      document.documentElement.classList.remove('dark');
+    } else {
+      document.documentElement.classList.add('dark');
+      document.documentElement.classList.remove('light');
+    }
+    localStorage.setItem('rollover_theme', theme);
+  }, [theme]);
 
   useEffect(() => { saveStakedSlips(stakedSlips); }, [stakedSlips]);
   useEffect(() => { saveHistory(history); }, [history]);
@@ -52,6 +83,18 @@ export default function App() {
 
   // Evict old cache entries on app start if storage is getting full
   useEffect(() => { evictIfNeeded(); }, []);
+
+  // Background data refresh: load historical DB + silent refresh + auto-scout + prediction tracking
+  useEffect(() => {
+    (async () => {
+      try {
+        const { initBackgroundServices } = await import('./lib/background-service');
+        await initBackgroundServices();
+      } catch (e) {
+        console.warn('[App] Background service init failed:', e);
+      }
+    })();
+  }, []);
 
   // Auto Result-Checking: poll every 5 minutes, auto-settle finished picks
   // Also runs immediately on mount for returning users with ended matches
@@ -76,8 +119,19 @@ export default function App() {
       if (!shouldPoll(pending)) return;
 
       const settlements = await checkAndSettle(pending);
-      // Apply each settlement
+      // Apply each settlement — update scores on selections first, then mark result
       for (const s of settlements) {
+        setStagedSlips(prev => prev.map(slip =>
+          slip.slip.id === s.slipId ? {
+            ...slip,
+            slip: {
+              ...slip.slip,
+              selections: slip.slip.selections.map(sel =>
+                sel.id === s.selectionId ? { ...sel, score: { home: s.homeScore, away: s.awayScore } } : sel
+              )
+            }
+          } : slip
+        ));
         handleSelectionResult(s.slipId, s.selectionId, s.result);
       }
     }
@@ -90,6 +144,93 @@ export default function App() {
 
     return () => clearInterval(interval);
   }, [stakedSlips.length]); // Re-create interval only when slip count changes
+
+  // Backfill missing scores for already-settled selections (one-time on mount)
+  useEffect(() => {
+    let cancelled = false;
+    async function backfillScores() {
+      // Check if any staked slip has settled selections without scores
+      const needsBackfill = stakedSlips.some(staked =>
+        staked.slip.selections.some(sel =>
+          staked.selectionResults[sel.id] !== 'pending' && !sel.score
+        )
+      );
+      // Also check history
+      const historyNeedsBackfill = history.some(staked =>
+        staked.slip.selections.some(sel => !sel.score)
+      );
+
+      if (!needsBackfill && !historyNeedsBackfill) return;
+
+      try {
+        // Fetch from multiple sources
+        const [liveMatches, todayFS, yesterdayFS] = await Promise.all([
+          getLiveMatches().catch(() => [] as any[]),
+          fetchTodayFinished().catch(() => []),
+          fetchYesterdayResults().catch(() => []),
+        ]);
+        if (cancelled) return;
+
+        // Build a combined lookup function
+        function lookupScore(homeTeam: string, awayTeam: string): { home: number; away: number } | null {
+          // Try sportscore/ESPN first
+          const match = findMatchResult(liveMatches, homeTeam, awayTeam);
+          if (match && match.homeScore !== null && match.awayScore !== null) {
+            return { home: match.homeScore, away: match.awayScore };
+          }
+          // Try Flashscore today + yesterday
+          const homeNorm = homeTeam.toLowerCase();
+          const awayNorm = awayTeam.toLowerCase();
+          const allFS = [...todayFS, ...yesterdayFS];
+          const fsMatch = allFS.find(f => {
+            const fH = f.homeTeam.toLowerCase();
+            const fA = f.awayTeam.toLowerCase();
+            return (fH.includes(homeNorm) || homeNorm.includes(fH)) &&
+                   (fA.includes(awayNorm) || awayNorm.includes(fA));
+          });
+          if (fsMatch && fsMatch.score) {
+            const parts = fsMatch.score.split('-').map(Number);
+            if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+              return { home: parts[0], away: parts[1] };
+            }
+          }
+          return null;
+        }
+
+        // Backfill staked slips
+        if (needsBackfill) {
+          setStagedSlips(prev => prev.map(staked => {
+            let changed = false;
+            const updatedSelections = staked.slip.selections.map(sel => {
+              if (staked.selectionResults[sel.id] === 'pending' || sel.score) return sel;
+              const score = lookupScore(sel.homeTeam, sel.awayTeam);
+              if (score) { changed = true; return { ...sel, score }; }
+              return sel;
+            });
+            if (!changed) return staked;
+            return { ...staked, slip: { ...staked.slip, selections: updatedSelections } };
+          }));
+        }
+
+        // Backfill history
+        if (historyNeedsBackfill) {
+          setHistory(prev => prev.map(staked => {
+            let changed = false;
+            const updatedSelections = staked.slip.selections.map(sel => {
+              if (sel.score) return sel;
+              const score = lookupScore(sel.homeTeam, sel.awayTeam);
+              if (score) { changed = true; return { ...sel, score }; }
+              return sel;
+            });
+            if (!changed) return staked;
+            return { ...staked, slip: { ...staked.slip, selections: updatedSelections } };
+          }));
+        }
+      } catch { /* non-critical */ }
+    }
+    backfillScores();
+    return () => { cancelled = true; };
+  }, []); // Only on mount
 
   // Upcoming match notifications — alert 15 min before kickoff
   useEffect(() => {
@@ -170,6 +311,13 @@ export default function App() {
     }
     return scores;
   }, [selections, statsVersion, history.length]);
+
+  // Flat id → numeric score map (fed into the slip builder engine)
+  const scoreMap = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const [id, result] of selectionScores) m.set(id, result.score);
+    return m;
+  }, [selectionScores]);
 
   // Record predictions OUTSIDE useMemo (side-effect, batched)
   useEffect(() => {
@@ -455,14 +603,21 @@ export default function App() {
       const slip2 = prev.find(s => s.id === slipId2);
       if (!slip1 || !slip2) return prev;
 
-      const mergedSelections = [...slip1.selections, ...slip2.selections];
+      // Merge, de-duplicating any shared fixtures (never same match twice)
+      const seenKeys = new Set<string>();
+      const mergedSelections = [...slip1.selections, ...slip2.selections].filter(s => {
+        const key = `${s.homeTeam.toLowerCase()}-${s.awayTeam.toLowerCase()}`;
+        if (seenKeys.has(key)) return false;
+        seenKeys.add(key);
+        return true;
+      });
       const accOdds = mergedSelections.reduce((acc, s) => acc * s.odds, 1);
       const merged: Slip = {
         id: crypto.randomUUID(),
         selections: mergedSelections,
         accumulatedOdds: Math.round(accOdds * 100) / 100,
-        qualityScore: Math.round((slip1.qualityScore + slip2.qualityScore) / 2),
-        hasHighRiskPick: slip1.hasHighRiskPick || slip2.hasHighRiskPick,
+        qualityScore: calculateQuality(mergedSelections, DEFAULT_CONFIG, scoreMap),
+        hasHighRiskPick: mergedSelections.some(s => s.odds > 1.6),
         selectionCount: mergedSelections.length,
       };
       return [merged, ...prev.filter(s => s.id !== slipId1 && s.id !== slipId2)];
@@ -481,7 +636,8 @@ export default function App() {
         selections: remaining,
         accumulatedOdds: Math.round(accOdds * 100) / 100,
         selectionCount: remaining.length,
-        hasHighRiskPick: remaining.some(s => s.odds > 1.5),
+        qualityScore: calculateQuality(remaining, DEFAULT_CONFIG, scoreMap),
+        hasHighRiskPick: remaining.some(s => s.odds > 1.6),
       };
     }).filter(Boolean));
   }
@@ -497,8 +653,15 @@ export default function App() {
       const text = await navigator.clipboard.readText();
       if (text) {
         const result = parseSportyBet(text);
-        if (result.activeSelections.length > 0) {
-          setSelections(result.activeSelections);
+        // Strip already-started fixtures before they enter the working set
+        const now = Date.now();
+        const GRACE_MS = 5 * 60 * 1000;
+        const future = result.activeSelections.filter(s => {
+          const k = s.kickOffDateTime ? new Date(s.kickOffDateTime).getTime() : NaN;
+          return isNaN(k) || k > now - GRACE_MS;
+        });
+        if (future.length > 0) {
+          setSelections(future);
           setView('paste');
         }
       }
@@ -509,11 +672,6 @@ export default function App() {
 
   // Suggest best slip at a target odds level using confidence scores
   function handleSuggestSlip(targetOdds: number) {
-    const scoreMap = new Map<string, number>();
-    for (const [id, result] of selectionScores) {
-      scoreMap.set(id, result.score);
-    }
-
     const slip = suggestBestSlip(selections, scoreMap, targetOdds);
     if (slip) {
       setGeneratedSlips(prev => {
@@ -601,6 +759,14 @@ export default function App() {
           Search
         </button>
         <button
+          onClick={() => setView('fouls')}
+          className={`px-4 py-2 rounded text-sm font-medium ${
+            view === 'fouls' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-700'
+          }`}
+        >
+          Fouls
+        </button>
+        <button
           onClick={() => setView('slips')}
           className={`px-4 py-2 rounded text-sm font-medium ${
             view === 'slips' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-700'
@@ -616,7 +782,21 @@ export default function App() {
         >
           History {historyCount > 0 && <span className="ml-1 bg-gray-600 text-white px-1.5 py-0.5 rounded-full text-xs">{historyCount}</span>}
         </button>
-        <span className="ml-auto text-xs text-gray-600 self-center px-2">v2.1.0</span>
+        <span className="ml-auto text-xs text-gray-600 self-center px-2">v3.0.0 FS+</span>
+        <button
+          onClick={() => setShowAccuracy(true)}
+          className="px-2 py-2 rounded text-sm font-medium text-gray-300 hover:bg-gray-700"
+          title="Prediction Accuracy"
+        >
+          &#9776;
+        </button>
+        <button
+          onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+          className="px-2 py-2 rounded text-sm font-medium text-gray-300 hover:bg-gray-700"
+          title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+        >
+          {theme === 'dark' ? '\u2600' : '\u263D'}
+        </button>
         <button
           onClick={() => setShowApiSettings(true)}
           className="px-3 py-2 rounded text-sm font-medium text-gray-300 hover:bg-gray-700"
@@ -880,27 +1060,45 @@ export default function App() {
                 </div>
               )}
 
-              {/* Match Scout */}
+              {/* Match Scout — collapsible */}
               <div className="mb-4">
-                <MatchScout onAddPick={handleAddScoutedPick} />
+                <div className="flex items-center justify-between mb-2">
+                  <button
+                    onClick={() => { const v = !showScout; setShowScout(v); localStorage.setItem('rollover_show_scout', String(v)); }}
+                    className="flex items-center gap-2 text-md font-semibold text-blue-400 hover:text-blue-300"
+                  >
+                    <span className="text-xs">{showScout ? '▼' : '▶'}</span>
+                    Match Scout
+                  </button>
+                  <span className="text-xs text-gray-500">{showScout ? 'Click to hide' : 'Click to show'}</span>
+                </div>
+                {showScout && <MatchScout onAddPick={handleAddScoutedPick} />}
               </div>
 
-              {/* Generated Slips with Actions */}
+              {/* Generated Slips with Actions — collapsible */}
               {generatedSlips.length > 0 && (
                 <div className="mt-4">
                   <div className="flex items-center justify-between mb-2">
-                    <h3 className="text-md font-semibold text-green-400">
+                    <button
+                      onClick={() => { const v = !showGenerated; setShowGenerated(v); localStorage.setItem('rollover_show_generated', String(v)); }}
+                      className="flex items-center gap-2 text-md font-semibold text-green-400 hover:text-green-300"
+                    >
+                      <span className="text-xs">{showGenerated ? '▼' : '▶'}</span>
                       Generated ({generatedSlips.length} slips)
-                    </h3>
+                    </button>
+                    <span className="text-xs text-gray-500">{showGenerated ? 'Click to hide' : 'Click to show'}</span>
                   </div>
-                  <GeneratedSlips
-                    slips={generatedSlips}
-                    activeChains={activeChains}
-                    allSelections={selections}
-                    onSlipStaked={handleSlipStaked}
-                    onRemoveSlip={handleRemoveSlip}
-                    onRemovePick={handleRemovePick}
-                  />
+                  {showGenerated && (
+                    <GeneratedSlips
+                      slips={generatedSlips}
+                      activeChains={activeChains}
+                      allSelections={selections}
+                      onSlipStaked={handleSlipStaked}
+                      onRemoveSlip={handleRemoveSlip}
+                      onRemovePick={handleRemovePick}
+                      scores={scoreMap}
+                    />
+                  )}
                 </div>
               )}
 
@@ -956,6 +1154,7 @@ export default function App() {
                     onExportSelections={handleExportSelections}
                     onImportSelections={handleImportSelections}
                     onClearSelections={handleClearSelections}
+                    onAnalyze={(home, away, league) => setAnalyzeFixture({ home, away, league })}
                   />
                 </div>
               )}
@@ -1010,6 +1209,7 @@ export default function App() {
                     onSlipStaked={handleSlipStaked}
                     onRemoveSlip={handleRemoveSlip}
                     onRemovePick={handleRemovePick}
+                    scores={scoreMap}
                   />
                 </div>
               )}
@@ -1019,8 +1219,8 @@ export default function App() {
               {selections.length > 0 && (
                 <SlipGenerator
                   selections={selections}
-                  stakedMatchKeys={getStakedMatchKeys()}
                   onGenerated={setGeneratedSlips}
+                  scores={scoreMap}
                 />
               )}
             </div>
@@ -1040,6 +1240,12 @@ export default function App() {
           </div>
         )}
 
+        {view === 'fouls' && (
+          <div className="h-full p-4 overflow-y-auto pb-16">
+            <FoulsStrategy />
+          </div>
+        )}
+
         {view === 'slips' && (
           <div className="h-full p-4 overflow-y-auto pb-16">
               <ActiveSlips
@@ -1049,6 +1255,37 @@ export default function App() {
                 onSlipLost={handleSlipLost}
                 onSelectionResult={handleSelectionResult}
                 onUndoStake={handleUndoStake}
+                onUpdateScores={(updates) => {
+                  setStagedSlips(prev => prev.map(staked => {
+                    const slipUpdates = updates.filter(u => u.slipId === staked.slip.id);
+                    if (slipUpdates.length === 0) return staked;
+                    return {
+                      ...staked,
+                      slip: {
+                        ...staked.slip,
+                        selections: staked.slip.selections.map(sel => {
+                          const upd = slipUpdates.find(u => u.selectionId === sel.id);
+                          return upd ? { ...sel, score: upd.score } : sel;
+                        })
+                      }
+                    };
+                  }));
+                  // Also update history slips with same scores
+                  setHistory(prev => prev.map(staked => {
+                    const slipUpdates = updates.filter(u => u.slipId === staked.slip.id);
+                    if (slipUpdates.length === 0) return staked;
+                    return {
+                      ...staked,
+                      slip: {
+                        ...staked.slip,
+                        selections: staked.slip.selections.map(sel => {
+                          const upd = slipUpdates.find(u => u.selectionId === sel.id);
+                          return upd ? { ...sel, score: upd.score } : sel;
+                        })
+                      }
+                    };
+                  }));
+                }}
               />
           </div>
         )}
@@ -1086,6 +1323,18 @@ export default function App() {
         open={showApiSettings}
         onClose={() => setShowApiSettings(false)}
       />
+      <AccuracyDashboard
+        open={showAccuracy}
+        onClose={() => setShowAccuracy(false)}
+      />
+      {analyzeFixture && (
+        <MatchAnalysis
+          homeTeam={analyzeFixture.home}
+          awayTeam={analyzeFixture.away}
+          league={analyzeFixture.league}
+          onClose={() => setAnalyzeFixture(null)}
+        />
+      )}
     </div>
   );
 }

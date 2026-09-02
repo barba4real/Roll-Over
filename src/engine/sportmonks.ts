@@ -163,3 +163,183 @@ export interface SportmonksPrediction {
   over25Prob: number;
   bttsProb: number;
 }
+
+// ─── Maximized Endpoints ─────────────────────────────────────────────────────
+
+/**
+ * Get standings for a league.
+ * Free API: /standings?filters[league_id]={id}&include=participant
+ */
+export async function getStandings(leagueId: number): Promise<any[]> {
+  try {
+    const data = await apiFetch('/standings', {
+      'filters[league_id]': leagueId.toString(),
+      include: 'participant',
+    });
+    if (!Array.isArray(data)) return [];
+    return data.map((entry: any) => ({
+      position: entry.position || 0,
+      team: entry.participant?.name || '',
+      teamId: entry.participant_id || 0,
+      played: entry.details?.find((d: any) => d.type_id === 129)?.value || 0,
+      won: entry.details?.find((d: any) => d.type_id === 130)?.value || 0,
+      drawn: entry.details?.find((d: any) => d.type_id === 131)?.value || 0,
+      lost: entry.details?.find((d: any) => d.type_id === 132)?.value || 0,
+      goalsFor: entry.details?.find((d: any) => d.type_id === 133)?.value || 0,
+      goalsAgainst: entry.details?.find((d: any) => d.type_id === 134)?.value || 0,
+      points: entry.points || 0,
+    }));
+  } catch (e) {
+    console.warn('[Sportmonks] Standings failed:', e);
+    return [];
+  }
+}
+
+/**
+ * Get finished (past) fixtures for a league — for populating local DB.
+ * Free API: /fixtures?filters[league_id]={id}&filters[status]=FT&include=participants,scores
+ */
+export async function getFinishedFixtures(leagueId: number): Promise<import('./football-data-uk').HistoricalMatch[]> {
+  try {
+    const data = await apiFetch('/fixtures', {
+      'filters[league_id]': leagueId.toString(),
+      'filters[status]': 'FT',
+      include: 'participants,scores',
+    });
+    if (!Array.isArray(data)) return [];
+
+    const matches: import('./football-data-uk').HistoricalMatch[] = [];
+    for (const f of data) {
+      const participants = f.participants || [];
+      const home = participants.find((p: any) => p.meta?.location === 'home');
+      const away = participants.find((p: any) => p.meta?.location === 'away');
+      if (!home || !away) continue;
+
+      // Extract scores
+      const scores = f.scores || [];
+      const ftHome = scores.find((s: any) => s.description === 'CURRENT' && s.score?.participant === 'home')?.score?.goals;
+      const ftAway = scores.find((s: any) => s.description === 'CURRENT' && s.score?.participant === 'away')?.score?.goals;
+      if (ftHome == null || ftAway == null) continue;
+
+      matches.push({
+        division: leagueId.toString(),
+        date: f.starting_at?.split(' ')[0] || '',
+        time: f.starting_at?.split(' ')[1]?.slice(0, 5) || '',
+        homeTeam: home.name || '',
+        awayTeam: away.name || '',
+        ftHomeGoals: ftHome,
+        ftAwayGoals: ftAway,
+        ftResult: ftHome > ftAway ? 'H' : ftHome < ftAway ? 'A' : 'D',
+        htHomeGoals: null,
+        htAwayGoals: null,
+        htResult: null,
+        homeShots: null,
+        awayShots: null,
+        homeShotsOnTarget: null,
+        awayShotsOnTarget: null,
+        homeCorners: null,
+        awayCorners: null,
+        homeYellows: null,
+        awayYellows: null,
+        homeReds: null,
+            awayReds: null,
+            homeFouls: null,
+            awayFouls: null,
+        season: f.season_id?.toString() || '',
+        leagueId: SPORTMONKS_LEAGUES.find(l => l.id === leagueId)?.name || leagueId.toString(),
+      });
+    }
+    return matches;
+  } catch (e) {
+    console.warn('[Sportmonks] Finished fixtures failed:', e);
+    return [];
+  }
+}
+
+/**
+ * Get ALL finished fixtures from both free-plan leagues.
+ * Returns HistoricalMatch[] for local DB import.
+ */
+export async function fetchAllResults(): Promise<import('./football-data-uk').HistoricalMatch[]> {
+  const results = await Promise.allSettled(
+    SPORTMONKS_LEAGUES.map(l => getFinishedFixtures(l.id))
+  );
+  const all: import('./football-data-uk').HistoricalMatch[] = [];
+  for (const r of results) {
+    if (r.status === 'fulfilled') all.push(...r.value);
+  }
+  return all;
+}
+
+/**
+ * Get fixture statistics (shots, corners, cards, possession).
+ * Free API: /fixtures/{id}?include=statistics
+ */
+export async function getFixtureStats(fixtureId: number): Promise<any | null> {
+  try {
+    const data = await apiFetch(`/fixtures/${fixtureId}`, { include: 'statistics' });
+    return data?.statistics || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get team season statistics.
+ * Free API: /teams/{id}?include=statistics
+ */
+export async function getTeamStats(teamId: number): Promise<any | null> {
+  try {
+    const data = await apiFetch(`/teams/${teamId}`, { include: 'statistics' });
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get lineups for a fixture.
+ * Free API: /fixtures/{id}?include=lineups
+ */
+export async function getLineups(fixtureId: number): Promise<any[]> {
+  try {
+    const data = await apiFetch(`/fixtures/${fixtureId}`, { include: 'lineups' });
+    return data?.lineups || [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Get top scorers for a league season.
+ * Free API: /topscorers/seasons/{seasonId}
+ */
+export async function getTopScorers(seasonId: number): Promise<any[]> {
+  try {
+    const data = await apiFetch(`/topscorers/seasons/${seasonId}`, { include: 'player,participant' });
+    if (!Array.isArray(data)) return [];
+    return data.map((entry: any) => ({
+      player: entry.player?.display_name || '',
+      team: entry.participant?.name || '',
+      goals: entry.total || 0,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Get head-to-head between two teams.
+ * Free API: /fixtures/head-to-head/{teamId1}/{teamId2}
+ */
+export async function getH2H(teamId1: number, teamId2: number): Promise<any[]> {
+  try {
+    const data = await apiFetch(`/fixtures/head-to-head/${teamId1}/${teamId2}`, {
+      include: 'participants,scores',
+    });
+    if (!Array.isArray(data)) return [];
+    return data;
+  } catch {
+    return [];
+  }
+}

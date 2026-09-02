@@ -25,7 +25,9 @@
 
 // Allowed API domains (prevents abuse of the proxy)
 const ALLOWED_DOMAINS = [
-  'site.api.espn.com',
+  'cdn.espn.com',
+  'sports.core.api.espn.com',
+  'site.web.api.espn.com',
   'api.football-data.org',
   'v3.football.api-sports.io',
   'api.kickoffapi.com',
@@ -33,6 +35,16 @@ const ALLOWED_DOMAINS = [
   'api.the-odds-api.com',
   'www.thesportsdb.com',
   'api.openligadb.de',
+  'api.allsportdb.com',
+  // HTML-scraping sources
+  'www.flashscore.mobi',
+  'flashscore.mobi',
+  'www.flashscore.com.ng',
+  'm.flashscore.com.au',
+  'www.skysports.com',
+  'skysports.com',
+  'oddsmeter.com',
+  'www.oddsmeter.com',
 ];
 
 export default {
@@ -91,7 +103,6 @@ export default {
           method: 'GET',
           headers: {
             'Accept': 'application/json',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             ...targetHeaders,
           },
         });
@@ -106,8 +117,26 @@ export default {
           responseBody = { _raw: responseText };
         }
 
+        // Always return 200 to the client — include target status in response
+        // This prevents the Rust HTTP client from throwing on non-2xx target responses
+        if (!response.ok) {
+          return new Response(JSON.stringify({ 
+            error: `Target returned HTTP ${response.status}`,
+            status: response.status,
+            body: responseBody 
+          }), {
+            status: 200, // Always 200 to client
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'application/json',
+              'X-Proxy-Status': response.status.toString(),
+              'X-Proxy-Target': targetHost,
+            },
+          });
+        }
+
         return new Response(JSON.stringify(responseBody), {
-          status: response.status,
+          status: 200,
           headers: {
             ...corsHeaders,
             'Content-Type': 'application/json',
@@ -123,17 +152,14 @@ export default {
       }
     }
 
-    // Legacy ESPN-style path proxy (backward compat)
+    // Legacy path-based proxy (backward compat for non-POST clients)
     if (url.pathname.startsWith('/espn/')) {
       const espnPath = url.pathname.replace('/espn/', '');
-      const espnUrl = `https://site.api.espn.com/apis/site/v2/sports/soccer/${espnPath}${url.search}`;
+      const espnUrl = `https://cdn.espn.com/core/soccer/scoreboard?xhr=1&league=${espnPath}${url.search ? '&' + url.search.slice(1) : ''}`;
       
       try {
         const response = await fetch(espnUrl, {
-          headers: {
-            'Accept': 'application/json',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          },
+          headers: { 'Accept': 'application/json' },
         });
         const data = await response.json();
         return new Response(JSON.stringify(data), {
