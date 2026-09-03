@@ -4,6 +4,7 @@ import { interpretMarket, getMarketCategory } from '../engine/market-interpreter
 import { ScoringResult } from '../engine/scoring';
 import { computeMatchIntelligence, MatchIntelligence, getFormString, getGoalAverages } from '../engine/intelligence-hints';
 import { getAllMatches } from '../engine/historical-stats';
+import { hasLocalData, crawlMatchHistory } from '../engine/match-crawl';
 import MatchStatsModal from './MatchStatsModal';
 
 interface Props {
@@ -31,6 +32,9 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
   const [statsModal, setStatsModal] = useState<ParsedSelection | null>(null);
   const [intelCache, setIntelCache] = useState<Map<string, MatchIntelligence>>(new Map());
   const [analyzingAll, setAnalyzingAll] = useState(false);
+  // Batch pre-crawl state (populates the DB for a whole day's fixtures at once)
+  const [preCrawling, setPreCrawling] = useState(false);
+  const [crawlProgress, setCrawlProgress] = useState<{ done: number; total: number; added: number; msg: string } | null>(null);
 
   // Compute intelligence for all unique fixtures (lazy on demand)
   async function analyzeAllFixtures() {
@@ -52,6 +56,48 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
 
   function getIntel(sel: ParsedSelection): MatchIntelligence | undefined {
     return intelCache.get(`${sel.homeTeam}|${sel.awayTeam}`);
+  }
+
+  /**
+   * Batch pre-crawl: fetch + cache history for every fixture currently in the
+   * `filtered` view (typically one selected day) that lacks local data. Runs
+   * sequentially so we don't hammer the proxy, skips fixtures already covered,
+   * and persists to the DB — so subsequent Analyze/Intel are instant. Fixtures
+   * are deduped by team pair so both picks on the same match crawl once.
+   */
+  async function preCrawlFiltered(fixtures: ParsedSelection[]) {
+    // Unique fixtures by team pair
+    const seen = new Set<string>();
+    const unique: ParsedSelection[] = [];
+    for (const s of fixtures) {
+      const key = `${s.homeTeam.toLowerCase()}|${s.awayTeam.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(s);
+    }
+    // Only those missing local data
+    const toCrawl = unique.filter(s => !hasLocalData(s.homeTeam, s.awayTeam));
+    if (toCrawl.length === 0) {
+      setCrawlProgress({ done: 0, total: 0, added: 0, msg: 'All fixtures already have local data — nothing to crawl.' });
+      setTimeout(() => setCrawlProgress(null), 4000);
+      return;
+    }
+
+    setPreCrawling(true);
+    let totalAdded = 0;
+    for (let i = 0; i < toCrawl.length; i++) {
+      const s = toCrawl[i];
+      setCrawlProgress({ done: i, total: toCrawl.length, added: totalAdded, msg: `${s.homeTeam.split(' ')[0]} v ${s.awayTeam.split(' ')[0]}…` });
+      try {
+        const res = await crawlMatchHistory(s.homeTeam, s.awayTeam);
+        totalAdded += res.added;
+      } catch { /* best-effort — one failure doesn't stop the batch */ }
+    }
+    setCrawlProgress({ done: toCrawl.length, total: toCrawl.length, added: totalAdded, msg: `Done — added ${totalAdded} results across ${toCrawl.length} fixtures.` });
+    setPreCrawling(false);
+    // Refresh intel cache from the now-enriched DB
+    analyzeAllFixtures();
+    setTimeout(() => setCrawlProgress(null), 6000);
   }
 
   if (selections.length === 0) return null;
@@ -253,10 +299,37 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
           </button>
         )}
 
+        {/* Batch pre-crawl — populate the DB for all filtered fixtures at once */}
+        {filtered.length >= 1 && (
+          <button
+            onClick={() => preCrawlFiltered(filtered)}
+            disabled={preCrawling}
+            className="text-xs px-2 py-0.5 bg-indigo-700 hover:bg-indigo-600 disabled:bg-gray-600 rounded text-white font-medium flex items-center gap-1"
+            title="Crawl & cache historical data for every fixture shown here (skips ones already covered). Makes Analyze instant."
+          >
+            {preCrawling ? 'Pre-crawling…' : `⟳ Pre-crawl ${filtered.length !== selections.length ? 'these ' + filtered.length : 'all'}`}
+          </button>
+        )}
+
         <span className="text-xs text-gray-600 ml-auto">
           {filtered.length !== selections.length && `${filtered.length}/${selections.length}`}
         </span>
       </div>
+
+      {/* Pre-crawl progress */}
+      {crawlProgress && (
+        <div className="mb-2 p-2 bg-indigo-900/30 border border-indigo-800 rounded">
+          <div className="flex items-center justify-between text-[11px] text-indigo-200 mb-1">
+            <span>{crawlProgress.msg}</span>
+            {crawlProgress.total > 0 && <span className="text-indigo-400">{crawlProgress.done}/{crawlProgress.total} · +{crawlProgress.added}</span>}
+          </div>
+          {crawlProgress.total > 0 && (
+            <div className="h-1 bg-gray-800 rounded-full overflow-hidden">
+              <div className="h-full bg-indigo-500 transition-all" style={{ width: `${Math.round((crawlProgress.done / crawlProgress.total) * 100)}%` }} />
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Day chips — one-click filter by calendar day (chronological) */}
       {dayGroups.length > 1 && (

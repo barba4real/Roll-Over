@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Slip, Chain, ParsedSelection } from '../engine/types';
 import { formatSlipForClipboard, copyToClipboard } from '../lib/clipboard';
 import { slipWinProbability } from '../engine/grouping-engine';
+import MatchStatsModal from './MatchStatsModal';
 
 interface GSProps {
   scores?: Map<string, number>;
@@ -28,6 +29,7 @@ export default function GeneratedSlips({ slips, activeChains, allSelections, onS
   const [showOmitted, setShowOmitted] = useState<string | null>(null);
   const [batchSelected, setBatchSelected] = useState<Set<string>>(new Set());
   const [compareMode, setCompareMode] = useState(false);
+  const [statsModal, setStatsModal] = useState<ParsedSelection | null>(null); // analyze-from-slip
   // Filters
   const [showFilters, setShowFilters] = useState(false);
   const [oddsMin, setOddsMin] = useState<string>('');
@@ -344,9 +346,16 @@ export default function GeneratedSlips({ slips, activeChains, allSelections, onS
                         {sel.date} {sel.time}
                       </td>
                       <td className="py-1.5">
-                        <span className="text-gray-200">{sel.homeTeam}</span>
-                        <span className="text-gray-500"> v </span>
-                        <span className="text-gray-200">{sel.awayTeam}</span>
+                        <span
+                          className="cursor-pointer hover:text-blue-300 rounded px-1 -mx-1"
+                          onClick={() => setStatsModal(sel)}
+                          title="Analyze this fixture (Form, Stats, Intel)"
+                        >
+                          <span className="text-gray-200">{sel.homeTeam}</span>
+                          <span className="text-gray-500"> v </span>
+                          <span className="text-gray-200">{sel.awayTeam}</span>
+                          <span className="ml-1 text-[9px] text-blue-500">🔍</span>
+                        </span>
                       </td>
                       <td className="py-1.5">
                         <span className={sel.odds > 1.5 ? 'text-yellow-400' : 'text-green-400'}>
@@ -526,6 +535,15 @@ export default function GeneratedSlips({ slips, activeChains, allSelections, onS
           )}
         </div>
       ))}
+
+      {/* Analyze-from-slip modal */}
+      {statsModal && (
+        <MatchStatsModal
+          selection={statsModal}
+          selResult="pending"
+          onClose={() => setStatsModal(null)}
+        />
+      )}
     </div>
   );
 }
