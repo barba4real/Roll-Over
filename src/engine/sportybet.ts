@@ -31,6 +31,39 @@ import { ParsedSelection } from './types';
 // 1X2-2UP (60100), 1X2-1UP (60200), O/U&GG/NG combo (36).
 const MARKET_IDS = '1,10,11,18,26,29,36,14,60100,60200';
 
+// ─── Preferred Markets (the user's signature picks) ──────────────────────────
+// The exact markets the user specialises in. Confirmed IDs from the SportyBet
+// factsCenter catalog:
+//   60200 = 1X2 - 1UP (early payout)
+//   60110 = Double Chance - 1UP (early payout)
+//   50    = Home Team to Win Either Half
+//   51    = Away Team to Win Either Half
+//   900308/900309 = Home/Away Team Total Fouls (Betradar, league-gated). We also
+//                   detect fouls by group==='Fouls' + desc text, so it works
+//                   whenever SportyBet includes it even if the numeric id shifts.
+const PREFERRED_MARKET_IDS = '60200,60110,50,51,900308,900309,168,169';
+
+export type PreferredMarketKey = '1x2_1up' | 'dc_1up' | 'win_either_half' | 'home_fouls' | 'away_fouls';
+
+export interface PreferredMarketRow {
+  key: PreferredMarketKey;
+  marketLabel: string;             // e.g. "Home Team Fouls O/U"
+  line: string;                    // e.g. "Under 13.5" (full outcome desc)
+  odds: number;
+}
+
+export interface PreferredFixture {
+  eventId: string;
+  gameId: string;
+  homeTeam: string;
+  awayTeam: string;
+  league: string;                  // "Country: League"
+  kickoff: Date;
+  date: string;                    // DD/MM
+  time: string;                    // HH:MM
+  markets: PreferredMarketRow[];   // only the user's preferred markets present
+}
+
 // Region path segment. SportyBet is one network across countries; /ng and /gh
 // (and others) all serve the same API. Default /ng, overridable.
 export type SportyRegion = 'ng' | 'gh' | 'ke' | 'ug' | 'tz' | 'zm';
@@ -52,11 +85,11 @@ interface SbResponse { bizCode: number; data?: { totalNum: number; tournaments: 
 const BASE = 'https://www.sportybet.com';
 
 /**
- * Fetch one page of upcoming football events with odds.
+ * Fetch one page of upcoming football events, filtered to the given market IDs.
  */
-async function fetchPage(region: SportyRegion, pageNum: number, pageSize: number): Promise<SbTournament[]> {
+async function fetchPageFor(region: SportyRegion, marketIds: string, pageNum: number, pageSize: number): Promise<SbTournament[]> {
   const url = `${BASE}/api/${region}/factsCenter/pcUpcomingEvents`
-    + `?sportId=sr:sport:1&marketId=${MARKET_IDS}`
+    + `?sportId=sr:sport:1&marketId=${marketIds}`
     + `&pageSize=${pageSize}&pageNum=${pageNum}&option=1`;
   try {
     const res = await httpGet(url) as SbResponse;
@@ -69,6 +102,11 @@ async function fetchPage(region: SportyRegion, pageNum: number, pageSize: number
   } catch {
     return [];
   }
+}
+
+/** Fetch one page of upcoming football events with the default market set. */
+async function fetchPage(region: SportyRegion, pageNum: number, pageSize: number): Promise<SbTournament[]> {
+  return fetchPageFor(region, MARKET_IDS, pageNum, pageSize);
 }
 
 /**
@@ -140,6 +178,141 @@ export async function fetchSportyBetSelections(opts?: {
 
   onProgress?.(`Imported ${selections.length} SportyBet selections.`);
   return selections;
+}
+
+// ─── Preferred Markets Scout ─────────────────────────────────────────────────
+
+/**
+ * Match a SportyBet market to one of the user's preferred markets. Fouls are
+ * detected by group + desc text (robust to id changes); the others by id.
+ * Returns null if the market isn't one of the five.
+ */
+function classifyPreferred(m: SbMarket): { key: PreferredMarketKey; marketLabel: string } | null {
+  const group = ((m as any).group || '').toLowerCase();
+  const desc = (m.desc || '').toLowerCase();
+
+  if (m.id === '60200') return { key: '1x2_1up', marketLabel: '1X2 - 1UP' };
+  if (m.id === '60110') return { key: 'dc_1up', marketLabel: 'Double Chance - 1UP' };
+  if (m.id === '50') return { key: 'win_either_half', marketLabel: 'Home Team to Win Either Half' };
+  if (m.id === '51') return { key: 'win_either_half', marketLabel: 'Away Team to Win Either Half' };
+
+  // Fouls — league-gated. Detect by group/desc so it works whenever present.
+  const isFouls = group === 'fouls' || desc.includes('foul');
+  if (isFouls) {
+    if (desc.includes('home')) return { key: 'home_fouls', marketLabel: 'Home Team Fouls O/U' };
+    if (desc.includes('away')) return { key: 'away_fouls', marketLabel: 'Away Team Fouls O/U' };
+  }
+  return null;
+}
+
+/**
+ * Scan upcoming SportyBet fixtures and return only those that OFFER at least one
+ * of the user's preferred markets, with the live line + odds per market. This is
+ * the availability scout: fixtures where these (often uncommon) markets exist and
+ * can actually be booked.
+ *
+ * @param opts.region      region path (default 'ng')
+ * @param opts.maxPages     pages to scan (default 10)
+ * @param opts.pageSize     events per page (default 30)
+ * @param opts.leagueFilter optional substring to restrict to a league/country
+ * @param opts.onProgress   progress callback
+ */
+export async function fetchPreferredMarkets(opts?: {
+  region?: SportyRegion;
+  maxPages?: number;
+  pageSize?: number;
+  leagueFilter?: string | null;
+  onProgress?: (msg: string) => void;
+}): Promise<PreferredFixture[]> {
+  const region = opts?.region ?? 'ng';
+  const maxPages = opts?.maxPages ?? 10;
+  const pageSize = opts?.pageSize ?? 30;
+  const leagueFilter = (opts?.leagueFilter || '').toLowerCase().trim();
+  const onProgress = opts?.onProgress;
+
+  const now = Date.now();
+  const out: PreferredFixture[] = [];
+
+  for (let page = 1; page <= maxPages; page++) {
+    onProgress?.(`Scanning SportyBet page ${page}/${maxPages}…`);
+    const tournaments = await fetchPageFor(region, PREFERRED_MARKET_IDS, page, pageSize);
+    if (tournaments.length === 0) break;
+
+    for (const t of tournaments) {
+      for (const ev of t.events || []) {
+        const kickoff = new Date(ev.estimateStartTime);
+        if (isNaN(kickoff.getTime()) || kickoff.getTime() <= now) continue; // upcoming only
+
+        const country = ev.sport?.category?.name || '';
+        const leagueName = ev.sport?.category?.tournament?.name || t.name || '';
+        const league = country ? `${country}: ${leagueName}` : leagueName;
+        if (leagueFilter && !league.toLowerCase().includes(leagueFilter)) continue;
+
+        const rows: PreferredMarketRow[] = [];
+        for (const m of ev.markets || []) {
+          if (m.status && m.status !== 0) continue;
+          const cls = classifyPreferred(m);
+          if (!cls) continue;
+          for (const oc of m.outcomes || []) {
+            if (!oc.isActive) continue;
+            const odds = parseFloat(oc.odds);
+            if (!isFinite(odds) || odds < 1.01) continue;
+            rows.push({ key: cls.key, marketLabel: cls.marketLabel, line: (oc.desc || '').trim(), odds: Math.round(odds * 100) / 100 });
+          }
+        }
+        if (rows.length === 0) continue; // fixture doesn't offer any preferred market
+
+        out.push({
+          eventId: ev.eventId,
+          gameId: ev.gameId || ev.eventId,
+          homeTeam: ev.homeTeamName,
+          awayTeam: ev.awayTeamName,
+          league,
+          kickoff,
+          date: `${pad2(kickoff.getDate())}/${pad2(kickoff.getMonth() + 1)}`,
+          time: `${pad2(kickoff.getHours())}:${pad2(kickoff.getMinutes())}`,
+          markets: rows,
+        });
+      }
+    }
+  }
+
+  // Sort by soonest kickoff
+  out.sort((a, b) => a.kickoff.getTime() - b.kickoff.getTime());
+  onProgress?.(`Found ${out.length} fixture(s) offering your preferred markets.`);
+  return out;
+}
+
+/**
+ * Convert a chosen preferred-market row into a ParsedSelection for the pool.
+ */
+export function preferredRowToSelection(fx: PreferredFixture, row: PreferredMarketRow): ParsedSelection {
+  const marketType: ParsedSelection['marketType'] =
+    row.key === '1x2_1up' ? '1x2' :
+    row.key === 'dc_1up' ? 'double_chance' :
+    (row.key === 'home_fouls' || row.key === 'away_fouls') ? 'fouls' :
+    'special';
+  const category: ParsedSelection['pickCategory'] =
+    row.line.toLowerCase().includes('over') ? 'over' :
+    row.line.toLowerCase().includes('under') ? 'under' :
+    row.line.toLowerCase().includes('home') ? (row.line.toLowerCase().includes('draw') ? 'home_or_draw' : 'home') :
+    row.line.toLowerCase().includes('away') ? (row.line.toLowerCase().includes('draw') ? 'draw_or_away' : 'away') :
+    row.line.toLowerCase() === 'yes' ? 'yes' :
+    row.line.toLowerCase() === 'no' ? 'no' : 'other';
+
+  return buildSelection({
+    index: 0,
+    kickoff: fx.kickoff,
+    gameId: fx.gameId,
+    home: fx.homeTeam,
+    away: fx.awayTeam,
+    league: fx.league,
+    odds: row.odds,
+    market: row.marketLabel,
+    pick: row.line,
+    category,
+    marketType,
+  });
 }
 
 // ─── Market Mapping ──────────────────────────────────────────────────────────

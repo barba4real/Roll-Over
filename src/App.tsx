@@ -14,6 +14,7 @@ import SlipHistory from './components/SlipHistory';
 import MatchScout from './components/MatchScout';
 import MatchSearch from './components/MatchSearch';
 import FoulsStrategy from './components/FoulsStrategy';
+import PreferredMarkets from './components/PreferredMarkets';
 import { ParsedSelection, Slip, Chain } from './engine/types';
 import { parseSportyBet } from './engine/parser-sportybet';
 import { saveStakedSlips, loadStakedSlips, saveHistory, loadHistory, saveChains, loadChains, loadSettings, saveSettings, AppSettings, exportAllData, importAllData, saveSelections, loadSelections, exportSelections, importSelections, saveGeneratedSlips, loadGeneratedSlips, evictIfNeeded } from './lib/storage';
@@ -35,7 +36,7 @@ export interface StakedSlip {
   label: string; // User-defined name/note for this slip
 }
 
-type View = 'home' | 'paste' | 'search' | 'slips' | 'history' | 'fouls';
+type View = 'home' | 'paste' | 'search' | 'slips' | 'history' | 'fouls' | 'sporty';
 
 export default function App() {
   const [view, setView] = useState<View>('home');
@@ -814,6 +815,15 @@ export default function App() {
           Fouls
         </button>
         <button
+          onClick={() => setView('sporty')}
+          className={`px-4 py-2 rounded text-sm font-medium ${
+            view === 'sporty' ? 'bg-green-600 text-white' : 'text-gray-300 hover:bg-gray-700'
+          }`}
+          title="Scan SportyBet for fixtures offering your preferred markets"
+        >
+          Markets
+        </button>
+        <button
           onClick={() => setView('slips')}
           className={`px-4 py-2 rounded text-sm font-medium ${
             view === 'slips' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-700'
@@ -1319,6 +1329,28 @@ export default function App() {
         {view === 'fouls' && (
           <div className="h-full p-4 overflow-y-auto pb-16">
             <FoulsStrategy />
+          </div>
+        )}
+
+        {view === 'sporty' && (
+          <div className="h-full p-4 overflow-y-auto pb-16">
+            <PreferredMarkets onImport={(sels) => {
+              // Non-destructive merge into the pool, deduped by team+market+pick;
+              // drop already-started fixtures (same discipline as paste).
+              const now = Date.now();
+              const GRACE_MS = 5 * 60 * 1000;
+              const future = sels.filter(s => {
+                const k = s.kickOffDateTime ? new Date(s.kickOffDateTime).getTime() : NaN;
+                return isNaN(k) || k > now - GRACE_MS;
+              });
+              if (future.length === 0) return;
+              setSelections(prev => {
+                const keyOf = (s: ParsedSelection) => `${s.homeTeam.toLowerCase()}|${s.awayTeam.toLowerCase()}|${s.market.toLowerCase()}|${s.pick.toLowerCase()}`;
+                const existing = new Set(prev.map(keyOf));
+                const fresh = future.filter(s => !existing.has(keyOf(s)));
+                return [...prev, ...fresh];
+              });
+            }} />
           </div>
         )}
 
