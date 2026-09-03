@@ -150,6 +150,25 @@ export default function MatchStatsModal({ selection, selResult, onClose }: Props
 
   const isSettled = selResult === 'won' || selResult === 'lost';
 
+  // Detect the competition from the DB: the most common real league among this
+  // fixture's recent rows for either team. Helps confirm the exact league to
+  // stake on. Recomputed when the DB changes (refreshKey bumps after sync).
+  const detectedLeague = React.useMemo(() => {
+    const all = getAllMatches();
+    const rows = all.filter(m =>
+      isSameTeam(m.homeTeam, selection.homeTeam) || isSameTeam(m.awayTeam, selection.homeTeam) ||
+      isSameTeam(m.homeTeam, selection.awayTeam) || isSameTeam(m.awayTeam, selection.awayTeam)
+    );
+    const counts: Record<string, number> = {};
+    for (const m of rows) {
+      const lg = (m.division || '').trim();
+      if (!lg || /^(11v11|soccerpunter|thesportsdb|analyze-crawl)$/i.test(lg)) continue;
+      counts[lg] = (counts[lg] || 0) + 1;
+    }
+    const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    return top ? top[0] : null;
+  }, [selection.homeTeam, selection.awayTeam, refreshKey]);
+
   const tabs: { id: Tab; label: string }[] = [
     { id: 'summary', label: 'Summary' },
     { id: 'stats', label: 'Stats' },
@@ -171,9 +190,12 @@ export default function MatchStatsModal({ selection, selResult, onClose }: Props
               <h2 className="text-sm font-bold text-gray-200">
                 {selection.homeTeam} <span className="text-gray-500">vs</span> {selection.awayTeam}
               </h2>
-              <div className="flex items-center gap-2 mt-0.5">
+              <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                 <span className="text-xs text-gray-500">{selection.date} {selection.time}</span>
                 <span className="text-xs text-gray-500">{selection.market}</span>
+                {detectedLeague && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-300" title="League detected from historical data">🏆 {detectedLeague}</span>
+                )}
                 {selection.score && (
                   <span className="text-xs font-bold text-blue-400">
                     {selection.score.htHome !== undefined && `HT ${selection.score.htHome}-${selection.score.htAway} | `}
@@ -1005,6 +1027,9 @@ function TeamFormPanel({
                   </>
                 )}
               </span>
+              {m.league && (
+                <span className="text-gray-600 text-[9px] shrink-0 max-w-[90px] truncate" title={m.league}>{m.league}</span>
+              )}
               {m.htGoalsFor !== null && (
                 <span className="text-gray-600 text-[10px] shrink-0">HT {m.isHome ? `${m.htGoalsFor}-${m.htGoalsAgainst}` : `${m.htGoalsAgainst}-${m.htGoalsFor}`}</span>
               )}
@@ -1134,6 +1159,9 @@ function H2HSection({ h2h, homeTeam, awayTeam }: { h2h: import('../engine/intell
                   </>
                 )}
               </span>
+              {m.league && (
+                <span className="text-gray-600 text-[9px] shrink-0 max-w-[90px] truncate" title={m.league}>{m.league}</span>
+              )}
             </div>
           ))}
         </div>

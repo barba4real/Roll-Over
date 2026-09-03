@@ -42,6 +42,7 @@ export interface FormMatch {
   foulsCommitted: number | null;
   foulsAgainst: number | null;
   isHome: boolean;
+  league: string | null;   // competition name (from HistoricalMatch.division)
 }
 
 export interface TeamIntelligence {
@@ -143,8 +144,17 @@ export function getTeamMatches(team: string, allMatches: HistoricalMatch[], limi
       foulsCommitted: isHome ? m.homeFouls : m.awayFouls,
       foulsAgainst: isHome ? m.awayFouls : m.homeFouls,
       isHome,
+      league: cleanLeague(m.division || m.leagueId),
     };
   });
+}
+
+/** Return a real competition name, or null for generic source tags. */
+function cleanLeague(raw: string | null | undefined): string | null {
+  const s = (raw || '').trim();
+  if (!s) return null;
+  if (/^(11v11|soccerpunter|thesportsdb|analyze-crawl)$/i.test(s)) return null;
+  return s;
 }
 
 function getH2HMatches(team1: string, team2: string, allMatches: HistoricalMatch[], limit: number): FormMatch[] {
@@ -170,6 +180,7 @@ function getH2HMatches(team1: string, team2: string, allMatches: HistoricalMatch
       foulsCommitted: isTeam1Home ? m.homeFouls : m.awayFouls,
       foulsAgainst: isTeam1Home ? m.awayFouls : m.homeFouls,
       isHome: isTeam1Home,
+      league: cleanLeague(m.division || m.leagueId),
     };
   });
 }

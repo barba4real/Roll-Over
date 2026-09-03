@@ -11,6 +11,8 @@
  * This file can grow over time as new mismatches are discovered.
  */
 
+import { getLearnedCanonical } from './learned-aliases';
+
 // ─── Alias Map ───────────────────────────────────────────────────────────────
 
 const TEAM_ALIASES: Record<string, string[]> = {
@@ -463,6 +465,11 @@ export function resolveTeamName(name: string): string {
     }
   }
 
+  // Auto-learned bindings (populated by the evidence-based resolver). Consulted
+  // after the curated map so hand-curated entries always take precedence.
+  const learned = getLearnedCanonical(name);
+  if (learned) return learned;
+
   // Not found — return original name with basic cleanup
   return name.replace(/\s+(FC|AFC|SC|CF|AC)$/i, '').trim();
 }
@@ -473,6 +480,26 @@ export function resolveTeamName(name: string): string {
  */
 export function normalizeTeamForDedup(name: string): string {
   return resolveTeamName(name).toLowerCase();
+}
+
+/**
+ * True if the name is RECOGNIZED — it resolves to a curated or learned canonical
+ * (direct/stripped/partial alias hit or a learned binding), rather than merely
+ * falling through to the cleaned-up original. Used by the crawl to decide
+ * whether a fetched batch can be trusted without opponent/league corroboration.
+ */
+export function isKnownCanonical(name: string): boolean {
+  const lower = name.toLowerCase().trim();
+  if (aliasToCanonical.has(lower)) return true;
+  const stripped = lower
+    .replace(/\s+(fc|afc|sc|cf|ac|sk|jk|1907|1909|1913|1929|1846)$/i, '')
+    .replace(/^(fc|afc|ac|sc|ss|us|rc|og|sv|vf[lb]|tsg|sg|1\.\s*f[sc]v?)\s+/i, '')
+    .trim();
+  if (aliasToCanonical.has(stripped)) return true;
+  for (const alias of aliasToCanonical.keys()) {
+    if (alias.length > 5 && (lower.includes(alias) || alias.includes(lower))) return true;
+  }
+  return !!getLearnedCanonical(name);
 }
 
 /**

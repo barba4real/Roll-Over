@@ -16,7 +16,8 @@
 
 import type { HistoricalMatch } from './football-data-uk';
 import { loadMatches, getAllMatches } from './historical-stats';
-import { isSameTeam } from './team-aliases';
+import { isSameTeam, isKnownCanonical } from './team-aliases';
+import { resolveRows, FixtureContext } from './match-resolver';
 import { fetch11v11TeamResults } from './eleven-v-eleven';
 import { fetchSoccerPunterResults } from './soccerpunter';
 import { getTeamRecentResults } from './thesportsdb';
@@ -45,8 +46,11 @@ function sportsDbToHistorical(
         date = `${d}/${mo}/${y}`;
       }
       const season = seasonFromDate(date);
+      // Preserve the real competition name in `division` (falls back to the
+      // source tag) so the Analyze modal can surface which league a result
+      // came from — useful for deciding the exact league to stake on.
       return {
-        division: 'thesportsdb',
+        division: r.league || 'thesportsdb',
         date,
         time: '',
         homeTeam: r.home,
@@ -110,11 +114,16 @@ export interface CrawlResult {
 export async function crawlMatchHistory(
   homeTeam: string,
   awayTeam: string,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  league?: string | null
 ): Promise<CrawlResult> {
   onProgress?.('Searching all sources...');
 
-  const tasks: Promise<{ source: string; matches: HistoricalMatch[] }>[] = [];
+  // Each batch is a team's results from one source, tagged with WHICH fixture
+  // side we queried, so the resolver can confirm identity by evidence and learn
+  // aliases. { source, trackedName, matches }
+  type Batch = { source: string; trackedName: string; matches: HistoricalMatch[] };
+  const tasks: Promise<Batch[]>[] = [];
 
   // TheSportsDB — recent results for each team (JSON, global, no key)
   tasks.push((async () => {
@@ -123,9 +132,11 @@ export async function crawlMatchHistory(
         getTeamRecentResults(homeTeam),
         getTeamRecentResults(awayTeam),
       ]);
-      const matches = dedupe([...sportsDbToHistorical(h.results), ...sportsDbToHistorical(a.results)]);
-      return { source: 'TheSportsDB', matches };
-    } catch { return { source: 'TheSportsDB', matches: [] }; }
+      return [
+        { source: 'TheSportsDB', trackedName: homeTeam, matches: dedupe(sportsDbToHistorical(h.results)) },
+        { source: 'TheSportsDB', trackedName: awayTeam, matches: dedupe(sportsDbToHistorical(a.results)) },
+      ];
+    } catch { return []; }
   })());
 
   // 11v11 — deep history (HTML)
@@ -135,8 +146,11 @@ export async function crawlMatchHistory(
         fetch11v11TeamResults(homeTeam),
         fetch11v11TeamResults(awayTeam),
       ]);
-      return { source: '11v11', matches: dedupe([...h, ...a]) };
-    } catch { return { source: '11v11', matches: [] }; }
+      return [
+        { source: '11v11', trackedName: homeTeam, matches: dedupe(h) },
+        { source: '11v11', trackedName: awayTeam, matches: dedupe(a) },
+      ];
+    } catch { return []; }
   })());
 
   // SoccerPunter — global team results (HTML, best-effort)
@@ -146,19 +160,49 @@ export async function crawlMatchHistory(
         fetchSoccerPunterResults(homeTeam),
         fetchSoccerPunterResults(awayTeam),
       ]);
-      return { source: 'SoccerPunter', matches: dedupe([...h, ...a]) };
-    } catch { return { source: 'SoccerPunter', matches: [] }; }
+      return [
+        { source: 'SoccerPunter', trackedName: homeTeam, matches: dedupe(h) },
+        { source: 'SoccerPunter', trackedName: awayTeam, matches: dedupe(a) },
+      ];
+    } catch { return []; }
   })());
 
   const settled = await Promise.allSettled(tasks);
 
+  const ctx: FixtureContext = { homeTeam, awayTeam, league: league || null };
+
   const contributingSources: string[] = [];
+  const sourceCounts: Record<string, number> = {};
   let allMatches: HistoricalMatch[] = [];
+  let totalLearned = 0;
+
   for (const r of settled) {
-    if (r.status === 'fulfilled' && r.value.matches.length > 0) {
-      contributingSources.push(`${r.value.source} (${r.value.matches.length})`);
-      allMatches.push(...r.value.matches);
+    if (r.status !== 'fulfilled') continue;
+    for (const batch of r.value) {
+      if (batch.matches.length === 0) continue;
+
+      // Confirm identity by evidence. A batch is trusted if EITHER the queried
+      // name already resolves to a known canonical (curated/learned alias), OR
+      // the resolver corroborates at least one row (opponent / league). This
+      // keeps legitimate form data while catching wrong-club fetches, and it
+      // auto-learns aliases for confirmed-but-differently-spelled clubs.
+      const knownName = isKnownCanonical(batch.trackedName);
+      const { accepted: corroborated, learned } = resolveRows(batch.matches, ctx, batch.trackedName);
+      totalLearned += learned;
+
+      // If we corroborated any row for this team, we trust the whole batch as
+      // that team's games (its matches vs third parties are still that team's).
+      const trusted = knownName || corroborated.length > 0;
+      const rowsToKeep = trusted ? batch.matches : corroborated;
+      if (rowsToKeep.length === 0) continue;
+
+      allMatches.push(...rowsToKeep);
+      sourceCounts[batch.source] = (sourceCounts[batch.source] || 0) + rowsToKeep.length;
     }
+  }
+
+  for (const [src, n] of Object.entries(sourceCounts)) {
+    if (n > 0) contributingSources.push(`${src} (${n})`);
   }
 
   const merged = dedupe(allMatches);
@@ -166,6 +210,7 @@ export async function crawlMatchHistory(
     onProgress?.('No historical data found from any source.');
     return { added: 0, sources: [], total: getAllMatches().length };
   }
+  if (totalLearned > 0) onProgress?.(`Learned ${totalLearned} team name alias(es) from matched fixtures.`);
 
   // Save to persistent DB (async, best-effort) and in-memory engine (instant).
   onProgress?.(`Merging ${merged.length} results from ${contributingSources.length} sources...`);
