@@ -230,7 +230,7 @@ export default function MatchStatsModal({ selection, selResult, onClose }: Props
             </div>
           ) : (
             <>
-              {activeTab === 'summary' && <SummaryTab enrichment={enrichment} selection={selection} intelligence={intelligence} />}
+              {activeTab === 'summary' && <SummaryTab enrichment={enrichment} selection={selection} intelligence={intelligence} selResult={selResult} />}
               {activeTab === 'stats' && <StatsTab enrichment={enrichment} selection={selection} />}
               {activeTab === 'intelligence' && <IntelligenceTab intelligence={intelligence} />}
               {activeTab === 'form' && <FormTab intelligence={intelligence} selection={selection} />}
@@ -284,8 +284,20 @@ function buildMarketRead(
     return { text: `BTTS hit in ${H.bttsPct}% of ${hf}'s home games and ${A.bttsPct}% of ${af}'s away (avg ${combined}%). ${supportive ? 'Both sides tend to score.' : 'One side often keeps it tight.'}`, supportive };
   }
 
+  // Double chance (check BEFORE plain home/away so "Double Chance - 1UP" and
+  // "H/D", "1X", "X2" don't get misread as a straight home/away win).
+  if (m.includes('double') || m.includes('1up') || /\b(1x|x2|12)\b/.test(m) || m.includes('h/d') || m.includes('d/a') || m.includes('or draw')) {
+    // Home-or-draw leans supportive if the home side rarely loses at home;
+    // draw-or-away if the home side rarely wins at home. Default: home cover.
+    const drawOrAway = m.includes('x2') || m.includes('d/a') || m.includes('draw or away');
+    const homeNoLossRate = 100 - Math.round((H.losses / Math.max(1, H.played)) * 100);
+    const homeNoWinRate = 100 - H.winPct;
+    const supportive = drawOrAway ? homeNoWinRate >= 55 : homeNoLossRate >= 65;
+    const cover = drawOrAway ? `${af}/draw` : `${hf}/draw`;
+    return { text: `${cover} cover — ${hf} at home: ${H.wins}W ${H.draws}D ${H.losses}L; ${af} away: ${A.wins}W ${A.draws}D ${A.losses}L. ${supportive ? 'Form backs the double chance.' : 'Riskier — the uncovered outcome has been landing.'}`, supportive };
+  }
   // Home / 1 / home win
-  if (m.includes('home') || m === '1' || m.includes('1x2') && m.includes('home')) {
+  if (m.includes('home') || m === '1') {
     const supportive = H.winPct >= 55 && A.winPct <= 35;
     return { text: `${hf} won ${H.winPct}% at home; ${af} won ${A.winPct}% away. ${supportive ? 'Form favours the home side.' : 'Not a clear home edge on form.'}`, supportive };
   }
@@ -294,9 +306,11 @@ function buildMarketRead(
     const supportive = A.winPct >= 50 && H.winPct <= 40;
     return { text: `${af} won ${A.winPct}% away; ${hf} won ${H.winPct}% at home. ${supportive ? 'Form favours the away side.' : 'Away win not strongly backed by form.'}`, supportive };
   }
-  // Double chance / draw
-  if (m.includes('draw') || m.includes('x') || m.includes('double')) {
-    return { text: `${hf} at home: ${H.wins}W ${H.draws}D ${H.losses}L. ${af} away: ${A.wins}W ${A.draws}D ${A.losses}L.`, supportive: true };
+  // Plain draw
+  if (m.includes('draw')) {
+    const combinedDraw = Math.round(((H.draws / Math.max(1, H.played)) + (A.draws / Math.max(1, A.played))) / 2 * 100);
+    const supportive = combinedDraw >= 33;
+    return { text: `Draw rate ~${combinedDraw}% on venue form (${hf} ${H.draws}D/${H.played}, ${af} ${A.draws}D/${A.played}). ${supportive ? 'Draw is live on form.' : 'Draws have been uncommon.'}`, supportive };
   }
   // Fouls / cards markets
   if (m.includes('foul') || m.includes('card')) {
@@ -352,7 +366,7 @@ function KickoffCountdown({ kickoffMs }: { kickoffMs: number }) {
   );
 }
 
-function SummaryTab({ enrichment, selection, intelligence }: { enrichment: EnrichedMatchData | null; selection: ParsedSelection; intelligence: MatchIntelligence | null }) {
+function SummaryTab({ enrichment, selection, intelligence, selResult }: { enrichment: EnrichedMatchData | null; selection: ParsedSelection; intelligence: MatchIntelligence | null; selResult: 'pending' | 'won' | 'lost' }) {
   // Look up this exact fixture's final score from the local results DB. The
   // crawl/sync stores results there, so a played match has a score even when
   // live enrichment (possession/xG) isn't available.
@@ -460,13 +474,31 @@ function SummaryTab({ enrichment, selection, intelligence }: { enrichment: Enric
         </div>
       )}
 
-      {/* Pick-specific market read */}
-      {marketRead && (
-        <div className={`rounded-lg border p-2.5 ${marketRead.supportive ? 'border-green-800 bg-green-900/20' : 'border-yellow-800 bg-yellow-900/15'}`}>
-          <div className="text-[9px] font-bold uppercase tracking-wide text-gray-400 mb-1">Your pick: {selection.market}</div>
-          <p className="text-[12px] text-gray-200 leading-snug">{marketRead.text}</p>
-        </div>
-      )}
+      {/* Pick-specific market read. Once the selection is SETTLED, the colour
+          reflects the actual outcome (won=green, lost=red) — a form "lean" must
+          never paint a losing bet green. Pending picks use the form-lean tint. */}
+      {marketRead && (() => {
+        const settled = selResult === 'won' || selResult === 'lost';
+        const border = settled
+          ? (selResult === 'won' ? 'border-green-700 bg-green-900/25' : 'border-red-800 bg-red-900/20')
+          : (marketRead.supportive ? 'border-green-800 bg-green-900/20' : 'border-yellow-800 bg-yellow-900/15');
+        return (
+          <div className={`rounded-lg border p-2.5 ${border}`}>
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[9px] font-bold uppercase tracking-wide text-gray-400">Your pick: {selection.market}</span>
+              {settled && (
+                <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase ${selResult === 'won' ? 'bg-green-800 text-green-200' : 'bg-red-800 text-red-200'}`}>
+                  {selResult === 'won' ? '✓ Won' : '✗ Lost'}
+                </span>
+              )}
+            </div>
+            <p className="text-[12px] text-gray-200 leading-snug">
+              {settled && <span className="text-gray-500">Pre-match form read: </span>}
+              {marketRead.text}
+            </p>
+          </div>
+        );
+      })()}
 
       {/* Score block — three states: upcoming (countdown), played (score),
           or played-but-not-found. A pre-kickoff match NEVER shows a score. */}
