@@ -320,22 +320,40 @@ function SummaryTab({ enrichment, selection, intelligence }: { enrichment: Enric
     );
     if (pair.length === 0) return null;
 
-    // Parse a row's date to a timestamp (DD/MM/YYYY or YYYY-MM-DD).
+    // Parse a row's date to a day-key (YYYY-MM-DD) and a timestamp.
+    const dayKey = (d: string): string => {
+      if (!d) return '';
+      if (d.includes('/')) { const [dd, mm, yy] = d.split('/'); return `${yy.length === 2 ? '20' + yy : yy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`; }
+      return d.slice(0, 10);
+    };
     const ts = (d: string): number => {
-      if (!d) return 0;
-      if (d.includes('/')) { const [dd, mm, yy] = d.split('/'); return new Date(+(yy.length === 2 ? '20' + yy : yy), +mm - 1, +dd).getTime(); }
-      const t = new Date(d).getTime();
+      const k = dayKey(d);
+      const t = k ? new Date(k).getTime() : 0;
       return isNaN(t) ? 0 : t;
     };
 
-    // A row is "played" if it has any goals OR its date is in the past. This
-    // filters out future/scheduled 0-0 placeholder rows that would otherwise
-    // make Summary show a bogus 0-0.
-    const now = Date.now();
-    const played = pair.filter(m => (m.ftHomeGoals + m.ftAwayGoals) > 0 || (ts(m.date) > 0 && ts(m.date) < now));
-    const candidates = played.length > 0 ? played : pair;
-    // Prefer the most recent played meeting.
-    const hit = candidates.sort((a, b) => ts(b.date) - ts(a.date))[0];
+    // 1) Prefer the row on the SAME calendar day as the analyzed fixture — that
+    //    is unambiguously "this meeting". Among those, prefer a scored row over
+    //    a 0-0 scheduled placeholder.
+    const fixtureDay = selection.kickOffDateTime
+      ? `${selection.kickOffDateTime.getFullYear()}-${String(selection.kickOffDateTime.getMonth() + 1).padStart(2, '0')}-${String(selection.kickOffDateTime.getDate()).padStart(2, '0')}`
+      : '';
+    const sameDay = fixtureDay ? pair.filter(m => dayKey(m.date) === fixtureDay) : [];
+    const scoredSameDay = sameDay.filter(m => (m.ftHomeGoals + m.ftAwayGoals) > 0);
+
+    // 2) Otherwise, the most recent SCORED meeting; then any scored; then newest.
+    const scored = pair.filter(m => (m.ftHomeGoals + m.ftAwayGoals) > 0)
+      .sort((a, b) => ts(b.date) - ts(a.date));
+
+    // If the fixture day is still in the future and the only same-day row is a
+    // goalless placeholder, treat the score as not-yet-available (no bogus 0-0).
+    const fixtureInFuture = !!fixtureDay && new Date(fixtureDay).getTime() > Date.now();
+
+    const hit =
+      scoredSameDay[0] ||                                  // this fixture, played
+      scored[0] ||                                         // most recent scored meeting anywhere
+      (!fixtureInFuture ? sameDay[0] : undefined) ||       // this fixture, genuine 0-0 (only if not future)
+      null;
     if (!hit) return null;
 
     // Orient the score so [home, away] matches the selection's home/away
