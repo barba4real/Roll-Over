@@ -18,6 +18,7 @@
  */
 
 import { httpGetHtml } from '../lib/http';
+import { isSameTeam } from './team-aliases';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -127,6 +128,42 @@ export async function fetchMultipleDays(days: number = 7): Promise<FlashscoreFix
   }
 
   return allFixtures;
+}
+
+/**
+ * Find the authoritative "Country: League" label for a fixture by scanning
+ * Flashscore day pages around today. Flashscore groups every fixture under an
+ * explicit `<h4>COUNTRY: League</h4>` header, so this is the most reliable
+ * league source we have. Returns null if the fixture isn't found in the window.
+ *
+ * @param homeTeam / awayTeam  the fixture's teams (alias-matched)
+ * @param dayRange  how many days on each side of today to scan (default ±3)
+ */
+export async function findFlashscoreLeague(
+  homeTeam: string,
+  awayTeam: string,
+  dayRange: number = 3
+): Promise<string | null> {
+  // Scan today first, then outward (−range..+range), stopping at the first hit.
+  const offsets: number[] = [0];
+  for (let i = 1; i <= dayRange; i++) { offsets.push(i, -i); }
+
+  for (const off of offsets) {
+    let fixtures: FlashscoreFixture[];
+    try {
+      fixtures = await fetchDayFixtures(off);
+    } catch {
+      continue;
+    }
+    const hit = fixtures.find(f =>
+      (isSameTeam(f.homeTeam, homeTeam) && isSameTeam(f.awayTeam, awayTeam)) ||
+      (isSameTeam(f.homeTeam, awayTeam) && isSameTeam(f.awayTeam, homeTeam))
+    );
+    if (hit && (hit.country || hit.league)) {
+      return hit.country ? `${hit.country}: ${hit.league}`.trim() : hit.league;
+    }
+  }
+  return null;
 }
 
 /**

@@ -119,6 +119,18 @@ export async function crawlMatchHistory(
 ): Promise<CrawlResult> {
   onProgress?.('Searching all sources...');
 
+  // Flashscore is the most reliable league source — it groups fixtures under an
+  // explicit "Country: League" header. Look it up in parallel with the crawl so
+  // it adds no latency; used as the trusted league signal + to backfill rows
+  // that come from sources which don't carry a competition (11v11/SoccerPunter).
+  const leaguePromise: Promise<string | null> = (async () => {
+    if (league) return league; // caller already knows it (e.g. from the pasted fixture)
+    try {
+      const { findFlashscoreLeague } = await import('./flashscore');
+      return await findFlashscoreLeague(homeTeam, awayTeam);
+    } catch { return null; }
+  })();
+
   // Each batch is a team's results from one source, tagged with WHICH fixture
   // side we queried, so the resolver can confirm identity by evidence and learn
   // aliases. { source, trackedName, matches }
@@ -169,7 +181,10 @@ export async function crawlMatchHistory(
 
   const settled = await Promise.allSettled(tasks);
 
-  const ctx: FixtureContext = { homeTeam, awayTeam, league: league || null };
+  // Authoritative league (Flashscore or caller-provided) — used as the resolver's
+  // trusted league signal and to backfill the fixture's own row below.
+  const detectedLeague = await leaguePromise;
+  const ctx: FixtureContext = { homeTeam, awayTeam, league: detectedLeague };
 
   const contributingSources: string[] = [];
   const sourceCounts: Record<string, number> = {};
@@ -209,6 +224,23 @@ export async function crawlMatchHistory(
   if (merged.length === 0) {
     onProgress?.('No historical data found from any source.');
     return { added: 0, sources: [], total: getAllMatches().length };
+  }
+
+  // Backfill the authoritative league onto THIS fixture's own row(s) when the
+  // source didn't carry one (generic tag). We only stamp rows where BOTH teams
+  // are this fixture's pair — a team's other games belong to other leagues and
+  // must not be mislabelled.
+  if (detectedLeague) {
+    const isGeneric = (s: string) => !s || /^(11v11|soccerpunter|thesportsdb|analyze-crawl)$/i.test(s);
+    for (const m of merged) {
+      const isThisPair =
+        (isSameTeam(m.homeTeam, homeTeam) && isSameTeam(m.awayTeam, awayTeam)) ||
+        (isSameTeam(m.homeTeam, awayTeam) && isSameTeam(m.awayTeam, homeTeam));
+      if (isThisPair && isGeneric(m.division)) {
+        m.division = detectedLeague;
+        if (isGeneric(m.leagueId)) m.leagueId = detectedLeague;
+      }
+    }
   }
   if (totalLearned > 0) onProgress?.(`Learned ${totalLearned} team name alias(es) from matched fixtures.`);
 
