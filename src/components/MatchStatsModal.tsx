@@ -313,11 +313,31 @@ function SummaryTab({ enrichment, selection, intelligence }: { enrichment: Enric
   // live enrichment (possession/xG) isn't available.
   const dbScore = (() => {
     const all = getAllMatches();
-    const hit = all.find(m =>
+    // All DB rows for this exact team pair (either orientation).
+    const pair = all.filter(m =>
       (isSameTeam(m.homeTeam, selection.homeTeam) && isSameTeam(m.awayTeam, selection.awayTeam)) ||
       (isSameTeam(m.homeTeam, selection.awayTeam) && isSameTeam(m.awayTeam, selection.homeTeam))
     );
+    if (pair.length === 0) return null;
+
+    // Parse a row's date to a timestamp (DD/MM/YYYY or YYYY-MM-DD).
+    const ts = (d: string): number => {
+      if (!d) return 0;
+      if (d.includes('/')) { const [dd, mm, yy] = d.split('/'); return new Date(+(yy.length === 2 ? '20' + yy : yy), +mm - 1, +dd).getTime(); }
+      const t = new Date(d).getTime();
+      return isNaN(t) ? 0 : t;
+    };
+
+    // A row is "played" if it has any goals OR its date is in the past. This
+    // filters out future/scheduled 0-0 placeholder rows that would otherwise
+    // make Summary show a bogus 0-0.
+    const now = Date.now();
+    const played = pair.filter(m => (m.ftHomeGoals + m.ftAwayGoals) > 0 || (ts(m.date) > 0 && ts(m.date) < now));
+    const candidates = played.length > 0 ? played : pair;
+    // Prefer the most recent played meeting.
+    const hit = candidates.sort((a, b) => ts(b.date) - ts(a.date))[0];
     if (!hit) return null;
+
     // Orient the score so [home, away] matches the selection's home/away
     const homeIsFirst = isSameTeam(hit.homeTeam, selection.homeTeam);
     return {
@@ -453,20 +473,25 @@ function SummaryTab({ enrichment, selection, intelligence }: { enrichment: Enric
         </div>
       )}
 
-      {/* Quick intelligence */}
-      {intelligence && (
-        <div>
-          <h3 className="text-xs font-bold text-gray-400 mb-2 uppercase">Key Insights</h3>
-          <div className="space-y-1">
-            {[...intelligence.homeTeam.hints, ...intelligence.awayTeam.hints, ...intelligence.h2hHints]
-              .filter(h => h.strength === 'strong')
-              .slice(0, 4)
-              .map((h, i) => (
-                <div key={i} className="text-xs text-green-300">{h.icon} {h.text}</div>
+      {/* Quick intelligence — prefer strong signals, fall back to moderate so
+          the section is never an empty header. */}
+      {(() => {
+        if (!intelligence) return null;
+        const pool = [...intelligence.homeTeam.hints, ...intelligence.awayTeam.hints, ...intelligence.h2hHints];
+        const strong = pool.filter(h => h.strength === 'strong');
+        const shown = (strong.length > 0 ? strong : pool.filter(h => h.strength === 'moderate')).slice(0, 4);
+        if (shown.length === 0) return null;
+        return (
+          <div>
+            <h3 className="text-xs font-bold text-gray-400 mb-2 uppercase">Key Insights</h3>
+            <div className="space-y-1">
+              {shown.map((h, i) => (
+                <div key={i} className={`text-xs ${h.strength === 'strong' ? 'text-green-300' : 'text-gray-300'}`}>{h.icon} {h.text}</div>
               ))}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {!enrichment && !intelligence && (
         <p className="text-xs text-gray-500 text-center py-4">No detailed data available for this match</p>
@@ -510,7 +535,11 @@ function StatBar({ label, home, away, homeText, awayText, invert }: {
 }
 
 function StatsTab({ enrichment, selection }: { enrichment: EnrichedMatchData | null; selection: ParsedSelection }) {
-  const hasLive = !!enrichment && !!enrichment.stats.possession;
+  // "Live" only counts if enrichment actually carries real numbers — an empty
+  // shell has possession [0,0] (still a truthy array), which must NOT count as
+  // live or we'd render bars full of zeros instead of the DB-average fallback.
+  const poss = enrichment?.stats.possession;
+  const hasLive = !!enrichment && !!poss && (poss[0] + poss[1]) > 0;
 
   // ── Live match stats (finished-match detail from Flashscore) ──
   if (hasLive && enrichment) {
