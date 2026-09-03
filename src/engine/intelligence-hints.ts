@@ -490,3 +490,158 @@ export function getGoalAverages(matches: FormMatch[]): { scored: number; concede
   const conceded = matches.reduce((s, m) => s + m.goalsAgainst, 0) / matches.length;
   return { scored: +scored.toFixed(1), conceded: +conceded.toFixed(1), total: +(scored + conceded).toFixed(1) };
 }
+
+// ─── Venue Metrics (Enhancement 1) ───────────────────────────────────────────
+
+export interface VenueMetrics {
+  played: number;
+  wins: number;
+  draws: number;
+  losses: number;
+  avgScored: number;
+  avgConceded: number;
+  bttsPct: number;        // both teams scored
+  over15Pct: number;
+  over25Pct: number;
+  cleanSheetPct: number;  // kept a clean sheet (conceded 0)
+  failedToScorePct: number;
+  winPct: number;
+}
+
+/**
+ * Compute a full metrics strip for a set of a team's matches (already filtered
+ * to a venue + count in the UI). All percentages are 0-100 integers.
+ */
+export function computeVenueMetrics(matches: FormMatch[]): VenueMetrics {
+  const played = matches.length;
+  if (played === 0) {
+    return { played: 0, wins: 0, draws: 0, losses: 0, avgScored: 0, avgConceded: 0, bttsPct: 0, over15Pct: 0, over25Pct: 0, cleanSheetPct: 0, failedToScorePct: 0, winPct: 0 };
+  }
+  const wins = matches.filter(m => m.result === 'W').length;
+  const draws = matches.filter(m => m.result === 'D').length;
+  const losses = matches.filter(m => m.result === 'L').length;
+  const scored = matches.reduce((s, m) => s + m.goalsFor, 0);
+  const conceded = matches.reduce((s, m) => s + m.goalsAgainst, 0);
+  const btts = matches.filter(m => m.goalsFor >= 1 && m.goalsAgainst >= 1).length;
+  const over15 = matches.filter(m => (m.goalsFor + m.goalsAgainst) > 1.5).length;
+  const over25 = matches.filter(m => (m.goalsFor + m.goalsAgainst) > 2.5).length;
+  const cleanSheets = matches.filter(m => m.goalsAgainst === 0).length;
+  const failedToScore = matches.filter(m => m.goalsFor === 0).length;
+  const pct = (n: number) => Math.round((n / played) * 100);
+  return {
+    played, wins, draws, losses,
+    avgScored: +(scored / played).toFixed(1),
+    avgConceded: +(conceded / played).toFixed(1),
+    bttsPct: pct(btts),
+    over15Pct: pct(over15),
+    over25Pct: pct(over25),
+    cleanSheetPct: pct(cleanSheets),
+    failedToScorePct: pct(failedToScore),
+    winPct: pct(wins),
+  };
+}
+
+// ─── Momentum (Enhancement 3) ────────────────────────────────────────────────
+
+export type MomentumTrend = 'rising' | 'falling' | 'steady';
+
+/**
+ * Compare the most recent 3 matches to the prior 3 by points-per-game
+ * (W=3, D=1, L=0). Returns a trend + the two PPG values for display.
+ */
+export function computeMomentum(matches: FormMatch[]): { trend: MomentumTrend; recentPpg: number; priorPpg: number } {
+  const pts = (m: FormMatch) => (m.result === 'W' ? 3 : m.result === 'D' ? 1 : 0);
+  const recent = matches.slice(0, 3);
+  const prior = matches.slice(3, 6);
+  const ppg = (arr: FormMatch[]) => (arr.length ? arr.reduce((s, m) => s + pts(m), 0) / arr.length : 0);
+  const recentPpg = +ppg(recent).toFixed(2);
+  const priorPpg = +ppg(prior).toFixed(2);
+  let trend: MomentumTrend = 'steady';
+  if (prior.length >= 2) {
+    if (recentPpg - priorPpg >= 0.5) trend = 'rising';
+    else if (priorPpg - recentPpg >= 0.5) trend = 'falling';
+  }
+  return { trend, recentPpg, priorPpg };
+}
+
+// ─── Fixture Verdict (Enhancement 2) ─────────────────────────────────────────
+
+export interface FixtureVerdict {
+  headline: string;              // one-line human read
+  leans: string[];               // suggested market leans e.g. ['Over 1.5', 'Home']
+  homeSummary: string;           // short home-side note
+  awaySummary: string;           // short away-side note
+  confidence: 'strong' | 'moderate' | 'weak';
+}
+
+/**
+ * Fuse the home team's HOME form and the away team's AWAY form into a single
+ * plain-language verdict with market leans. Purely descriptive — no staking
+ * advice, just converging signals surfaced as a headline.
+ *
+ * @param homeHomeMatches home team's matches at home (most recent first)
+ * @param awayAwayMatches away team's matches away (most recent first)
+ */
+export function computeFixtureVerdict(
+  homeTeam: string,
+  awayTeam: string,
+  homeHomeMatches: FormMatch[],
+  awayAwayMatches: FormMatch[]
+): FixtureVerdict | null {
+  const H = computeVenueMetrics(homeHomeMatches.slice(0, 6));
+  const A = computeVenueMetrics(awayAwayMatches.slice(0, 6));
+  if (H.played < 3 || A.played < 3) return null;
+
+  const homeFirst = homeTeam.split(' ')[0];
+  const awayFirst = awayTeam.split(' ')[0];
+  const leans: string[] = [];
+  const notes: string[] = [];
+
+  // ── Result lean ──
+  const homeStrong = H.winPct >= 60;
+  const awayWeakAway = A.winPct <= 25;
+  const awayStrong = A.winPct >= 55;
+  const homeWeakHome = H.winPct <= 30;
+  if (homeStrong && awayWeakAway) { leans.push('Home'); notes.push(`${homeFirst} strong at home`); }
+  else if (awayStrong && homeWeakHome) { leans.push('Away'); notes.push(`${awayFirst} strong on the road`); }
+
+  // ── Goals lean ──
+  const expTotal = H.avgScored + A.avgScored;
+  const bothLeak = H.avgConceded >= 1.3 && A.avgConceded >= 1.3;
+  if ((H.over15Pct >= 70 && A.over15Pct >= 70) || expTotal >= 2.6) leans.push('Over 1.5');
+  if ((H.over25Pct >= 60 && A.over25Pct >= 55) || expTotal >= 3.2) leans.push('Over 2.5');
+  if (H.over25Pct <= 30 && A.over25Pct <= 30 && expTotal <= 2.0) leans.push('Under 2.5');
+
+  // ── BTTS lean ──
+  if (H.bttsPct >= 60 && A.bttsPct >= 60 && bothLeak) leans.push('BTTS');
+  if ((H.cleanSheetPct >= 50 || A.failedToScorePct >= 50)) leans.push('BTTS No');
+
+  // ── Notes for each side ──
+  const homeSummary =
+    H.winPct >= 60 ? `won ${H.wins}/${H.played} at home` :
+    H.winPct <= 30 ? `only ${H.wins}W in last ${H.played} at home` :
+    `${H.wins}W ${H.draws}D ${H.losses}L at home`;
+  const awaySummary =
+    A.avgConceded >= 1.5 ? `leaking away (concede ${A.avgConceded}/game)` :
+    A.winPct >= 55 ? `won ${A.wins}/${A.played} away` :
+    A.cleanSheetPct >= 50 ? `tight away (${A.cleanSheetPct}% clean sheets)` :
+    `${A.wins}W ${A.draws}D ${A.losses}L away`;
+
+  // De-dup leans, keep order, cap
+  const uniqueLeans = Array.from(new Set(leans)).slice(0, 4);
+
+  // Headline
+  let headline: string;
+  if (uniqueLeans.length === 0) {
+    headline = `${homeFirst} ${homeSummary}; ${awayFirst} ${awaySummary}. No strong convergence — treat as a toss-up.`;
+  } else {
+    headline = `${homeFirst} ${homeSummary}, ${awayFirst} ${awaySummary} → ${uniqueLeans.join(' + ')}.`;
+  }
+
+  // Confidence: how many independent signals converge
+  const signalCount = notes.length + (uniqueLeans.length >= 2 ? 2 : uniqueLeans.length);
+  const confidence: FixtureVerdict['confidence'] =
+    signalCount >= 4 ? 'strong' : signalCount >= 2 ? 'moderate' : 'weak';
+
+  return { headline, leans: uniqueLeans, homeSummary, awaySummary, confidence };
+}

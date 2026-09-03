@@ -13,7 +13,7 @@
 import React, { useState, useEffect } from 'react';
 import { ParsedSelection } from '../engine/types';
 import { EnrichedMatchData, fetchMatchEnrichment, getCachedEnrichment, getCachedEnrichmentByTeams } from '../engine/match-enrichment';
-import { computeMatchIntelligence, MatchIntelligence, IntelligenceHint, getTeamMatches } from '../engine/intelligence-hints';
+import { computeMatchIntelligence, MatchIntelligence, IntelligenceHint, getTeamMatches, computeVenueMetrics, computeMomentum, computeFixtureVerdict, MomentumTrend } from '../engine/intelligence-hints';
 import { getAllMatches } from '../engine/historical-stats';
 import { fetchDayFixtures } from '../engine/flashscore';
 import { isSameTeam } from '../engine/team-aliases';
@@ -447,6 +447,30 @@ function IntelligenceTab({ intelligence }: { intelligence: MatchIntelligence | n
 type Venue = 'all' | 'home' | 'away';
 type Count = 6 | 12 | 0; // 0 = All
 
+/** Single metric cell in the venue stat strip. */
+function Metric({ label, value, sub, highlight, warn }: { label: string; value: string; sub?: string; highlight?: boolean; warn?: boolean }) {
+  return (
+    <div className={`rounded px-1 py-1 ${highlight ? (warn ? 'bg-red-900/40' : 'bg-green-900/40') : 'bg-gray-800'}`}>
+      <div className={`text-[12px] font-bold ${highlight ? (warn ? 'text-red-300' : 'text-green-300') : 'text-gray-200'}`}>{value}</div>
+      <div className="text-[8px] text-gray-500 uppercase leading-tight">{label}{sub ? ` ${sub}` : ''}</div>
+    </div>
+  );
+}
+
+/** Momentum trend badge comparing recent 3 vs prior 3 matches (points/game). */
+function MomentumBadge({ trend, recentPpg, priorPpg }: { trend: MomentumTrend; recentPpg: number; priorPpg: number }) {
+  const cfg = trend === 'rising'
+    ? { icon: '▲', cls: 'text-green-400', label: 'Rising' }
+    : trend === 'falling'
+    ? { icon: '▼', cls: 'text-red-400', label: 'Falling' }
+    : { icon: '▬', cls: 'text-gray-500', label: 'Steady' };
+  return (
+    <span className={`text-[10px] font-medium flex items-center gap-1 ${cfg.cls}`} title={`Recent 3: ${recentPpg} pts/game vs prior 3: ${priorPpg} pts/game`}>
+      {cfg.icon} {cfg.label} <span className="text-gray-600">({recentPpg}→ from {priorPpg})</span>
+    </span>
+  );
+}
+
 /**
  * A single team's form panel — venue toggle (All/Home/Away) + count selector
  * (6/12/All), like a standard livescore layout. Pulls the full match list for
@@ -476,7 +500,12 @@ function TeamFormPanel({
 
   const shown = count === 0 ? venueFiltered : venueFiltered.slice(0, count);
 
-  // Compact W/D/L summary for the current venue selection
+  // Metrics + momentum are computed over the SHOWN window (respects count),
+  // so the numbers always match the rows the user is looking at.
+  const metrics = React.useMemo(() => computeVenueMetrics(shown), [shown]);
+  const momentum = React.useMemo(() => computeMomentum(shown), [shown]);
+
+  // Compact W/D/L summary for the current venue selection (full filtered set)
   const w = venueFiltered.filter(m => m.result === 'W').length;
   const d = venueFiltered.filter(m => m.result === 'D').length;
   const l = venueFiltered.filter(m => m.result === 'L').length;
@@ -527,6 +556,40 @@ function TeamFormPanel({
         </div>
       </div>
 
+      {/* Form-string ribbon + momentum trend (Enhancement 3) */}
+      {shown.length > 0 && (
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-1">
+            {shown.slice(0, 10).map((m, i) => (
+              <span
+                key={i}
+                title={`${m.date}: ${m.result}`}
+                className={`w-4 h-4 flex items-center justify-center rounded-sm text-[9px] font-bold ${
+                  m.result === 'W' ? 'bg-green-700 text-green-100' :
+                  m.result === 'D' ? 'bg-yellow-700 text-yellow-100' :
+                  'bg-red-700 text-red-100'
+                }`}
+              >{m.result}</span>
+            ))}
+          </div>
+          <MomentumBadge trend={momentum.trend} recentPpg={momentum.recentPpg} priorPpg={momentum.priorPpg} />
+        </div>
+      )}
+
+      {/* Venue metrics strip (Enhancement 1) */}
+      {metrics.played > 0 && (
+        <div className="grid grid-cols-4 gap-1 mb-2 text-center">
+          <Metric label="Scored" value={metrics.avgScored.toFixed(1)} sub="avg" />
+          <Metric label="Conceded" value={metrics.avgConceded.toFixed(1)} sub="avg" />
+          <Metric label="Win%" value={`${metrics.winPct}%`} highlight={metrics.winPct >= 60} />
+          <Metric label="CS%" value={`${metrics.cleanSheetPct}%`} />
+          <Metric label="O1.5" value={`${metrics.over15Pct}%`} highlight={metrics.over15Pct >= 75} />
+          <Metric label="O2.5" value={`${metrics.over25Pct}%`} highlight={metrics.over25Pct >= 60} />
+          <Metric label="BTTS" value={`${metrics.bttsPct}%`} highlight={metrics.bttsPct >= 60} />
+          <Metric label="FTS%" value={`${metrics.failedToScorePct}%`} highlight={metrics.failedToScorePct >= 40} warn />
+        </div>
+      )}
+
       {/* Rows */}
       {shown.length === 0 ? (
         <p className="text-[11px] text-gray-600 py-2">No {venue === 'all' ? '' : venue + ' '}matches in database.</p>
@@ -573,8 +636,43 @@ function FormTab({ intelligence, selection }: { intelligence: MatchIntelligence 
     return <p className="text-xs text-gray-500 text-center py-8">No form data available.</p>;
   }
 
+  // Fixture verdict — fuse home team's HOME form with away team's AWAY form.
+  const verdict = React.useMemo(() => {
+    const all = getAllMatches();
+    const homeHome = getTeamMatches(selection.homeTeam, all, 500).filter(m => m.isHome);
+    const awayAway = getTeamMatches(selection.awayTeam, all, 500).filter(m => !m.isHome);
+    return computeFixtureVerdict(selection.homeTeam, selection.awayTeam, homeHome, awayAway);
+  }, [selection.homeTeam, selection.awayTeam]);
+
   return (
     <div>
+      {/* Verdict banner (Enhancement 2) */}
+      {verdict && (
+        <div className={`mb-4 rounded-lg border p-3 ${
+          verdict.confidence === 'strong' ? 'border-green-700 bg-green-900/25' :
+          verdict.confidence === 'moderate' ? 'border-blue-700 bg-blue-900/20' :
+          'border-gray-700 bg-gray-800/50'
+        }`}>
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-[10px] font-bold uppercase tracking-wide text-gray-400">Fixture Verdict</span>
+            <span className={`text-[9px] px-1.5 py-0.5 rounded uppercase font-bold ${
+              verdict.confidence === 'strong' ? 'bg-green-800 text-green-200' :
+              verdict.confidence === 'moderate' ? 'bg-blue-800 text-blue-200' :
+              'bg-gray-700 text-gray-300'
+            }`}>{verdict.confidence}</span>
+          </div>
+          <p className="text-[12px] text-gray-200 leading-snug">{verdict.headline}</p>
+          {verdict.leans.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1 mt-2">
+              {verdict.leans.map((lean, i) => (
+                <span key={i} className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-indigo-800 text-indigo-100">{lean}</span>
+              ))}
+            </div>
+          )}
+          <p className="text-[9px] text-gray-500 mt-1.5">Descriptive read from venue-specific form — not staking advice.</p>
+        </div>
+      )}
+
       {/* Home team defaults to its Home form; away team defaults to its Away
           form — the standard livescore view — but both are fully switchable. */}
       <TeamFormPanel teamName={selection.homeTeam} defaultVenue="home" />
