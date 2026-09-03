@@ -13,7 +13,7 @@
 import React, { useState, useEffect } from 'react';
 import { ParsedSelection } from '../engine/types';
 import { EnrichedMatchData, fetchMatchEnrichment, getCachedEnrichment, getCachedEnrichmentByTeams } from '../engine/match-enrichment';
-import { computeMatchIntelligence, MatchIntelligence, IntelligenceHint, getTeamMatches, computeVenueMetrics, computeMomentum, computeFixtureVerdict, MomentumTrend } from '../engine/intelligence-hints';
+import { computeMatchIntelligence, MatchIntelligence, IntelligenceHint, getTeamMatches, computeVenueMetrics, computeMomentum, computeFixtureVerdict, computeAverageStats, getFormString, MomentumTrend } from '../engine/intelligence-hints';
 import { getAllMatches } from '../engine/historical-stats';
 import { fetchDayFixtures } from '../engine/flashscore';
 import { isSameTeam } from '../engine/team-aliases';
@@ -231,7 +231,7 @@ export default function MatchStatsModal({ selection, selResult, onClose }: Props
           ) : (
             <>
               {activeTab === 'summary' && <SummaryTab enrichment={enrichment} selection={selection} intelligence={intelligence} />}
-              {activeTab === 'stats' && <StatsTab enrichment={enrichment} />}
+              {activeTab === 'stats' && <StatsTab enrichment={enrichment} selection={selection} />}
               {activeTab === 'intelligence' && <IntelligenceTab intelligence={intelligence} />}
               {activeTab === 'form' && <FormTab intelligence={intelligence} selection={selection} />}
             </>
@@ -243,6 +243,69 @@ export default function MatchStatsModal({ selection, selResult, onClose }: Props
 }
 
 // ─── Summary Tab ─────────────────────────────────────────────────────────────
+
+/**
+ * Build a plain-language read for the SPECIFIC market in the selection, using
+ * both teams' venue-form rates. Returns whether the recent form supports the
+ * pick. Descriptive only — never staking advice.
+ */
+function buildMarketRead(
+  market: string,
+  H: import('../engine/intelligence-hints').VenueMetrics,
+  A: import('../engine/intelligence-hints').VenueMetrics,
+  homeTeam: string,
+  awayTeam: string
+): { text: string; supportive: boolean } | null {
+  if (H.played < 3 || A.played < 3) return null;
+  const m = (market || '').toLowerCase();
+  const hf = homeTeam.split(' ')[0];
+  const af = awayTeam.split(' ')[0];
+
+  // Over/Under goals
+  if (m.includes('over') || m.includes('under') || m.includes('o/u') || m.includes('goal')) {
+    const combined = Math.round((H.over25Pct + A.over25Pct) / 2);
+    const combined15 = Math.round((H.over15Pct + A.over15Pct) / 2);
+    if (m.includes('under')) {
+      const supportive = combined <= 45;
+      return { text: `${hf} O2.5 rate ${H.over25Pct}% at home, ${af} ${A.over25Pct}% away (avg ${combined}%). ${supportive ? 'Recent form leans toward Under.' : 'Recent form runs against Under — goals have been landing.'}`, supportive };
+    }
+    if (m.includes('1.5')) {
+      const supportive = combined15 >= 70;
+      return { text: `Over 1.5 landed in ${H.over15Pct}% of ${hf}'s home games and ${A.over15Pct}% of ${af}'s away (avg ${combined15}%). ${supportive ? 'Form supports Over 1.5.' : 'Mixed — Over 1.5 not a lock on form.'}`, supportive };
+    }
+    const supportive = combined >= 55;
+    return { text: `Over 2.5 landed in ${H.over25Pct}% of ${hf}'s home games and ${A.over25Pct}% of ${af}'s away (avg ${combined}%). ${supportive ? 'Form supports the Over.' : 'Form is lukewarm for the Over.'}`, supportive };
+  }
+
+  // BTTS / GG
+  if (m.includes('btts') || m.includes('gg') || m.includes('both teams')) {
+    const combined = Math.round((H.bttsPct + A.bttsPct) / 2);
+    const supportive = combined >= 55;
+    return { text: `BTTS hit in ${H.bttsPct}% of ${hf}'s home games and ${A.bttsPct}% of ${af}'s away (avg ${combined}%). ${supportive ? 'Both sides tend to score.' : 'One side often keeps it tight.'}`, supportive };
+  }
+
+  // Home / 1 / home win
+  if (m.includes('home') || m === '1' || m.includes('1x2') && m.includes('home')) {
+    const supportive = H.winPct >= 55 && A.winPct <= 35;
+    return { text: `${hf} won ${H.winPct}% at home; ${af} won ${A.winPct}% away. ${supportive ? 'Form favours the home side.' : 'Not a clear home edge on form.'}`, supportive };
+  }
+  // Away / 2
+  if (m.includes('away') || m === '2') {
+    const supportive = A.winPct >= 50 && H.winPct <= 40;
+    return { text: `${af} won ${A.winPct}% away; ${hf} won ${H.winPct}% at home. ${supportive ? 'Form favours the away side.' : 'Away win not strongly backed by form.'}`, supportive };
+  }
+  // Double chance / draw
+  if (m.includes('draw') || m.includes('x') || m.includes('double')) {
+    return { text: `${hf} at home: ${H.wins}W ${H.draws}D ${H.losses}L. ${af} away: ${A.wins}W ${A.draws}D ${A.losses}L.`, supportive: true };
+  }
+  // Fouls / cards markets
+  if (m.includes('foul') || m.includes('card')) {
+    return { text: `Discipline market — check the Stats tab for per-game fouls averages. ${hf} & ${af} form shown there.`, supportive: true };
+  }
+
+  // Generic fallback
+  return { text: `${hf} at home: ${H.wins}W-${H.draws}D-${H.losses}L, avg ${H.avgScored} scored. ${af} away: ${A.wins}W-${A.draws}D-${A.losses}L, avg ${A.avgScored} scored.`, supportive: true };
+}
 
 function SummaryTab({ enrichment, selection, intelligence }: { enrichment: EnrichedMatchData | null; selection: ParsedSelection; intelligence: MatchIntelligence | null }) {
   // Look up this exact fixture's final score from the local results DB. The
@@ -277,8 +340,53 @@ function SummaryTab({ enrichment, selection, intelligence }: { enrichment: Enric
     : dbScore ? [dbScore.home, dbScore.away]
     : null;
 
+  // Team-vs-team form header + pick-specific market read (from DB form)
+  const all = getAllMatches();
+  const homeHome = getTeamMatches(selection.homeTeam, all, 500).filter(m => m.isHome);
+  const awayAway = getTeamMatches(selection.awayTeam, all, 500).filter(m => !m.isHome);
+  const homeFormStr = getFormString(homeHome, 5);
+  const awayFormStr = getFormString(awayAway, 5);
+  const Hm = computeVenueMetrics(homeHome.slice(0, 6));
+  const Am = computeVenueMetrics(awayAway.slice(0, 6));
+  const marketRead = buildMarketRead(selection.market, Hm, Am, selection.homeTeam, selection.awayTeam);
+
+  const FormChars = ({ str }: { str: string }) => (
+    <span className="inline-flex gap-0.5">
+      {str.split('').map((c, i) => (
+        <span key={i} className={`w-3.5 h-3.5 flex items-center justify-center rounded-sm text-[8px] font-bold ${
+          c === 'W' ? 'bg-green-700 text-green-100' : c === 'D' ? 'bg-yellow-700 text-yellow-100' : 'bg-red-700 text-red-100'
+        }`}>{c}</span>
+      ))}
+    </span>
+  );
+
   return (
     <div className="space-y-4">
+      {/* Team-vs-team form header */}
+      {(homeFormStr || awayFormStr) && (
+        <div className="flex items-center justify-between bg-gray-800 rounded-lg p-2.5">
+          <div className="flex-1 text-center">
+            <div className="text-[11px] font-bold text-blue-300 truncate">{selection.homeTeam.split(' ')[0]}</div>
+            <div className="text-[8px] text-gray-500 uppercase mb-1">Home form</div>
+            {homeFormStr ? <FormChars str={homeFormStr} /> : <span className="text-[10px] text-gray-600">no data</span>}
+          </div>
+          <div className="px-2 text-gray-600 text-[10px]">vs</div>
+          <div className="flex-1 text-center">
+            <div className="text-[11px] font-bold text-orange-300 truncate">{selection.awayTeam.split(' ')[0]}</div>
+            <div className="text-[8px] text-gray-500 uppercase mb-1">Away form</div>
+            {awayFormStr ? <FormChars str={awayFormStr} /> : <span className="text-[10px] text-gray-600">no data</span>}
+          </div>
+        </div>
+      )}
+
+      {/* Pick-specific market read */}
+      {marketRead && (
+        <div className={`rounded-lg border p-2.5 ${marketRead.supportive ? 'border-green-800 bg-green-900/20' : 'border-yellow-800 bg-yellow-900/15'}`}>
+          <div className="text-[9px] font-bold uppercase tracking-wide text-gray-400 mb-1">Your pick: {selection.market}</div>
+          <p className="text-[12px] text-gray-200 leading-snug">{marketRead.text}</p>
+        </div>
+      )}
+
       {/* Score — shown for a played match; otherwise a clear notice */}
       {played && displayScore ? (
         <div className="text-center py-3 bg-gray-800 rounded-lg">
@@ -369,58 +477,155 @@ function SummaryTab({ enrichment, selection, intelligence }: { enrichment: Enric
 
 // ─── Stats Tab ───────────────────────────────────────────────────────────────
 
-function StatsTab({ enrichment }: { enrichment: EnrichedMatchData | null }) {
-  if (!enrichment || !enrichment.stats.possession) {
-    return <p className="text-xs text-gray-500 text-center py-8">No match statistics available. Stats are fetched from Flashscore for finished matches.</p>;
+/**
+ * A single comparison row rendered as a proportional split bar (livescore
+ * style): the side with the larger value gets the brighter/wider fill.
+ */
+function StatBar({ label, home, away, homeText, awayText, invert }: {
+  label: string;
+  home: number;
+  away: number;
+  homeText: string;
+  awayText: string;
+  invert?: boolean; // when true, LOWER is better (e.g. fouls) — flip who is highlighted
+}) {
+  const total = home + away;
+  const homePct = total > 0 ? Math.round((home / total) * 100) : 50;
+  const awayPct = 100 - homePct;
+  const homeBetter = invert ? home < away : home > away;
+  const awayBetter = invert ? away < home : away > home;
+  return (
+    <div className="py-1.5">
+      <div className="flex items-center justify-between text-[11px] mb-1">
+        <span className={`font-bold ${homeBetter ? 'text-blue-300' : 'text-gray-300'}`}>{homeText}</span>
+        <span className="text-gray-500 text-[10px] uppercase">{label}</span>
+        <span className={`font-bold ${awayBetter ? 'text-orange-300' : 'text-gray-300'}`}>{awayText}</span>
+      </div>
+      <div className="flex h-1.5 rounded-full overflow-hidden bg-gray-800">
+        <div className={`${homeBetter ? 'bg-blue-500' : 'bg-blue-800'}`} style={{ width: `${homePct}%` }} />
+        <div className={`${awayBetter ? 'bg-orange-500' : 'bg-orange-800'}`} style={{ width: `${awayPct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function StatsTab({ enrichment, selection }: { enrichment: EnrichedMatchData | null; selection: ParsedSelection }) {
+  const hasLive = !!enrichment && !!enrichment.stats.possession;
+
+  // ── Live match stats (finished-match detail from Flashscore) ──
+  if (hasLive && enrichment) {
+    const s = enrichment.stats;
+    const rows: React.ReactNode[] = [];
+    if (s.possession) rows.push(<StatBar key="pos" label="Possession" home={s.possession[0]} away={s.possession[1]} homeText={`${s.possession[0]}%`} awayText={`${s.possession[1]}%`} />);
+    if (s.xG) rows.push(<StatBar key="xg" label="Expected Goals" home={s.xG[0]} away={s.xG[1]} homeText={`${s.xG[0]}`} awayText={`${s.xG[1]}`} />);
+    if (s.shots) rows.push(<StatBar key="sh" label="Total Shots" home={s.shots[0]} away={s.shots[1]} homeText={`${s.shots[0]}`} awayText={`${s.shots[1]}`} />);
+    if (s.shotsOnTarget) rows.push(<StatBar key="sot" label="Shots on Target" home={s.shotsOnTarget[0]} away={s.shotsOnTarget[1]} homeText={`${s.shotsOnTarget[0]}`} awayText={`${s.shotsOnTarget[1]}`} />);
+    if (s.corners) rows.push(<StatBar key="cor" label="Corners" home={s.corners[0]} away={s.corners[1]} homeText={`${s.corners[0]}`} awayText={`${s.corners[1]}`} />);
+    if (s.fouls) rows.push(<StatBar key="fls" label="Fouls" home={s.fouls[0]} away={s.fouls[1]} homeText={`${s.fouls[0]}`} awayText={`${s.fouls[1]}`} invert />);
+    if (s.offsides) rows.push(<StatBar key="off" label="Offsides" home={s.offsides[0]} away={s.offsides[1]} homeText={`${s.offsides[0]}`} awayText={`${s.offsides[1]}`} />);
+
+    return (
+      <div>
+        <div className="flex items-center justify-between text-[11px] font-bold mb-3">
+          <span className="text-blue-300">{enrichment.homeTeam}</span>
+          <span className="text-gray-500 text-[9px] uppercase">Match Stats</span>
+          <span className="text-orange-300">{enrichment.awayTeam}</span>
+        </div>
+        {rows}
+        {s.passes && (
+          <div className="grid grid-cols-2 gap-2 mt-3 text-center">
+            <div className="bg-gray-800 rounded p-1.5"><div className="text-[11px] text-gray-200 font-medium">{s.passes[0]}</div><div className="text-[8px] text-gray-500 uppercase">Home Passes</div></div>
+            <div className="bg-gray-800 rounded p-1.5"><div className="text-[11px] text-gray-200 font-medium">{s.passes[1]}</div><div className="text-[8px] text-gray-500 uppercase">Away Passes</div></div>
+          </div>
+        )}
+      </div>
+    );
   }
 
-  const stats = enrichment.stats;
-  const statRows: { label: string; home: string; away: string }[] = [];
+  // ── Fallback: season-average comparison from the results DB ──
+  // When live per-match stats aren't available, still give a useful team-vs-team
+  // read using per-game averages (home team at home vs away team away).
+  const all = getAllMatches();
+  const homeMatches = getTeamMatches(selection.homeTeam, all, 500).filter(m => m.isHome).slice(0, 12);
+  const awayMatches = getTeamMatches(selection.awayTeam, all, 500).filter(m => !m.isHome).slice(0, 12);
+  const H = computeAverageStats(homeMatches);
+  const A = computeAverageStats(awayMatches);
 
-  if (stats.possession) statRows.push({ label: 'Possession', home: `${stats.possession[0]}%`, away: `${stats.possession[1]}%` });
-  if (stats.shots) statRows.push({ label: 'Total Shots', home: `${stats.shots[0]}`, away: `${stats.shots[1]}` });
-  if (stats.shotsOnTarget) statRows.push({ label: 'Shots on Target', home: `${stats.shotsOnTarget[0]}`, away: `${stats.shotsOnTarget[1]}` });
-  if (stats.corners) statRows.push({ label: 'Corners', home: `${stats.corners[0]}`, away: `${stats.corners[1]}` });
-  if (stats.fouls) statRows.push({ label: 'Fouls', home: `${stats.fouls[0]}`, away: `${stats.fouls[1]}` });
-  if (stats.xG) statRows.push({ label: 'Expected Goals (xG)', home: `${stats.xG[0]}`, away: `${stats.xG[1]}` });
-  if (stats.offsides) statRows.push({ label: 'Offsides', home: `${stats.offsides[0]}`, away: `${stats.offsides[1]}` });
-  if (stats.passes) statRows.push({ label: 'Passes', home: stats.passes[0], away: stats.passes[1] });
+  if (H.played < 3 || A.played < 3) {
+    return <p className="text-xs text-gray-500 text-center py-8">No match statistics available. Live stats come from Flashscore for finished matches; season averages need at least 3 games per team in the database. Try "Sync sources".</p>;
+  }
 
   return (
     <div>
-      <div className="grid grid-cols-3 gap-1 text-center text-xs mb-2 text-gray-500">
-        <span>{enrichment.homeTeam}</span>
-        <span></span>
-        <span>{enrichment.awayTeam}</span>
+      <div className="flex items-center justify-between text-[11px] font-bold mb-1">
+        <span className="text-blue-300">{selection.homeTeam.split(' ')[0]}</span>
+        <span className="text-gray-500 text-[9px] uppercase">Season Averages</span>
+        <span className="text-orange-300">{selection.awayTeam.split(' ')[0]}</span>
       </div>
-      <div className="space-y-1">
-        {statRows.map((row, i) => (
-          <div key={i} className="grid grid-cols-3 gap-1 text-center text-xs py-1.5 border-b border-gray-800">
-            <span className="text-white font-medium">{row.home}</span>
-            <span className="text-gray-500">{row.label}</span>
-            <span className="text-white font-medium">{row.away}</span>
-          </div>
-        ))}
-      </div>
+      <p className="text-[9px] text-gray-600 text-center mb-3">Per-game — {selection.homeTeam.split(' ')[0]} at home ({H.played}), {selection.awayTeam.split(' ')[0]} away ({A.played})</p>
+      <StatBar label="Avg Goals Scored" home={H.avgScored} away={A.avgScored} homeText={H.avgScored.toFixed(2)} awayText={A.avgScored.toFixed(2)} />
+      <StatBar label="Avg Goals Conceded" home={H.avgConceded} away={A.avgConceded} homeText={H.avgConceded.toFixed(2)} awayText={A.avgConceded.toFixed(2)} invert />
+      {H.avgFouls !== null && A.avgFouls !== null && (
+        <StatBar label="Avg Fouls" home={H.avgFouls} away={A.avgFouls} homeText={H.avgFouls.toFixed(1)} awayText={A.avgFouls.toFixed(1)} invert />
+      )}
+      <div className="mt-3 text-[9px] text-gray-600 text-center">Live shot/possession/xG data unavailable for this match — showing form-based averages.</div>
     </div>
   );
 }
 
 // ─── Intelligence Tab ────────────────────────────────────────────────────────
 
+/** Tally strong-signal directions across all hints into a market consensus. */
+function buildConsensus(hints: IntelligenceHint[]): { label: string; count: number; tone: 'pos' | 'neg' | 'neutral' }[] {
+  const buckets: Record<string, { count: number; tone: 'pos' | 'neg' | 'neutral' }> = {};
+  const bump = (label: string, tone: 'pos' | 'neg' | 'neutral', weight: number) => {
+    if (!buckets[label]) buckets[label] = { count: 0, tone };
+    buckets[label].count += weight;
+  };
+  for (const h of hints) {
+    const weight = h.strength === 'strong' ? 2 : h.strength === 'moderate' ? 1 : 0;
+    if (weight === 0) continue;
+    for (const r of h.relevantTo || []) {
+      if (r.startsWith('over_')) bump(`Over ${r.split('_')[1]}`, 'pos', weight);
+      else if (r.startsWith('under_')) bump(`Under ${r.split('_')[1]}`, 'neg', weight);
+      else if (r === 'btts_yes') bump('BTTS', 'pos', weight);
+      else if (r === 'btts_no') bump('BTTS No', 'neg', weight);
+      else if (r === 'home_win') bump('Home', 'pos', weight);
+      else if (r === 'away_win') bump('Away', 'pos', weight);
+      else if (r === 'draw') bump('Draw', 'neutral', weight);
+      else if (r === 'handicap') bump('Handicap', 'neutral', weight);
+      else if (r === 'fouls') bump('Fouls', 'neutral', weight);
+    }
+  }
+  return Object.entries(buckets)
+    .map(([label, v]) => ({ label, count: v.count, tone: v.tone }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 6);
+}
+
 function IntelligenceTab({ intelligence }: { intelligence: MatchIntelligence | null }) {
   if (!intelligence) {
     return <p className="text-xs text-gray-500 text-center py-8">No historical data in database for these teams.</p>;
   }
 
-  const Section = ({ title, hints }: { title: string; hints: IntelligenceHint[] }) => (
+  const allHints = [
+    ...intelligence.homeTeam.hints,
+    ...intelligence.awayTeam.hints,
+    ...intelligence.h2hHints,
+    ...intelligence.combinedHints,
+  ];
+  const consensus = buildConsensus(allHints);
+  const strongCount = allHints.filter(h => h.strength === 'strong').length;
+
+  const Section = ({ title, hints, accent }: { title: string; hints: IntelligenceHint[]; accent: string }) => (
     hints.length > 0 ? (
       <div className="mb-4">
-        <h4 className="text-[10px] font-bold text-gray-500 mb-1.5 uppercase">{title}</h4>
+        <h4 className={`text-[10px] font-bold mb-1.5 uppercase ${accent}`}>{title}</h4>
         <div className="space-y-1">
           {hints.map((h, i) => (
-            <div key={i} className={`text-xs ${h.strength === 'strong' ? 'text-green-300' : 'text-gray-400'}`}>
-              {h.icon} {h.text}
+            <div key={i} className={`text-xs flex items-start gap-1.5 ${h.strength === 'strong' ? 'text-green-300' : 'text-gray-400'}`}>
+              <span className="shrink-0">{h.icon}</span>
+              <span>{h.text}{h.strength === 'strong' && <span className="ml-1 text-[8px] px-1 py-0.5 rounded bg-green-900 text-green-400 uppercase align-middle">strong</span>}</span>
             </div>
           ))}
         </div>
@@ -428,16 +633,49 @@ function IntelligenceTab({ intelligence }: { intelligence: MatchIntelligence | n
     ) : null
   );
 
+  const confColor = intelligence.dataConfidence === 'high' ? 'text-green-400' : intelligence.dataConfidence === 'medium' ? 'text-yellow-400' : 'text-red-400';
+
   return (
     <div>
-      <div className="mb-3 text-[10px] text-gray-600">
-        Based on {intelligence.homeTeam.dataPoints + intelligence.awayTeam.dataPoints} matches in database
-        ({intelligence.dataConfidence} confidence)
+      {/* Data confidence + strong signal count */}
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-[10px] text-gray-500">
+          {intelligence.homeTeam.dataPoints + intelligence.awayTeam.dataPoints} matches ·{' '}
+          <span className={confColor}>{intelligence.dataConfidence} confidence</span>
+        </div>
+        <div className="text-[10px] text-gray-500">{strongCount} strong signal{strongCount === 1 ? '' : 's'}</div>
       </div>
-      <Section title={`${intelligence.homeTeam.teamName} (Home)`} hints={intelligence.homeTeam.hints} />
-      <Section title={`${intelligence.awayTeam.teamName} (Away)`} hints={intelligence.awayTeam.hints} />
-      <Section title="Head to Head" hints={intelligence.h2hHints} />
-      <Section title="Combined Analysis" hints={intelligence.combinedHints} />
+
+      {/* Signal consensus */}
+      {consensus.length > 0 && (
+        <div className="mb-4 bg-gray-800 rounded-lg p-2.5">
+          <div className="text-[9px] font-bold uppercase tracking-wide text-gray-400 mb-2">Signal Consensus</div>
+          <div className="flex flex-wrap gap-1.5">
+            {consensus.map((c, i) => (
+              <span key={i} className={`text-[10px] font-medium px-2 py-0.5 rounded-full flex items-center gap-1 ${
+                c.tone === 'pos' ? 'bg-green-900 text-green-200' : c.tone === 'neg' ? 'bg-red-900 text-red-200' : 'bg-gray-700 text-gray-200'
+              }`}>
+                {c.label}<span className="opacity-60">×{c.count}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Contradictions — surfaced prominently */}
+      {intelligence.contradictions.length > 0 && (
+        <div className="mb-4 rounded-lg border border-yellow-800 bg-yellow-900/15 p-2.5">
+          <div className="text-[9px] font-bold uppercase tracking-wide text-yellow-400 mb-1.5">Conflicting Signals</div>
+          {intelligence.contradictions.map((h, i) => (
+            <div key={i} className="text-[11px] text-yellow-200">{h.icon} {h.text}</div>
+          ))}
+        </div>
+      )}
+
+      <Section title={`${intelligence.homeTeam.teamName} (Home)`} hints={intelligence.homeTeam.hints} accent="text-blue-400" />
+      <Section title={`${intelligence.awayTeam.teamName} (Away)`} hints={intelligence.awayTeam.hints} accent="text-orange-400" />
+      <Section title="Head to Head" hints={intelligence.h2hHints} accent="text-purple-400" />
+      <Section title="Combined Analysis" hints={intelligence.combinedHints} accent="text-gray-400" />
     </div>
   );
 }

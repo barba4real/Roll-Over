@@ -541,6 +541,37 @@ export function computeVenueMetrics(matches: FormMatch[]): VenueMetrics {
   };
 }
 
+// ─── Season-Average Stats (Stats-tab fallback) ───────────────────────────────
+
+export interface AverageStats {
+  played: number;
+  avgScored: number;
+  avgConceded: number;
+  avgFouls: number | null;   // null when no fouls data in DB
+}
+
+/**
+ * Compute per-game averages for a team's matches (venue-filtered upstream).
+ * Used by the Stats tab when live match stats (possession/xG) aren't available
+ * so the tab still shows a meaningful team-vs-team comparison.
+ */
+export function computeAverageStats(matches: FormMatch[]): AverageStats {
+  const played = matches.length;
+  if (played === 0) return { played: 0, avgScored: 0, avgConceded: 0, avgFouls: null };
+  const scored = matches.reduce((s, m) => s + m.goalsFor, 0);
+  const conceded = matches.reduce((s, m) => s + m.goalsAgainst, 0);
+  const withFouls = matches.filter(m => m.foulsCommitted !== null);
+  const avgFouls = withFouls.length >= 3
+    ? +(withFouls.reduce((s, m) => s + (m.foulsCommitted || 0), 0) / withFouls.length).toFixed(1)
+    : null;
+  return {
+    played,
+    avgScored: +(scored / played).toFixed(2),
+    avgConceded: +(conceded / played).toFixed(2),
+    avgFouls,
+  };
+}
+
 // ─── Momentum (Enhancement 3) ────────────────────────────────────────────────
 
 export type MomentumTrend = 'rising' | 'falling' | 'steady';
