@@ -13,6 +13,7 @@
  */
 
 import { httpGetHtml } from '../lib/http';
+import { teamNameVariants } from './team-aliases';
 import type { HistoricalMatch } from './football-data-uk';
 
 const BASE = 'https://www.11v11.com';
@@ -32,16 +33,22 @@ function toSlug(team: string): string {
  * Returns HistoricalMatch[] (scored, finished matches only).
  */
 export async function fetch11v11TeamResults(teamName: string): Promise<HistoricalMatch[]> {
-  const slug = toSlug(teamName);
-  const url = `${BASE}/teams/${slug}/tab/matches/`;
-  try {
-    const res = await httpGetHtml(url, { 'Accept': 'text/html' });
-    if (!res.text || res.text.length < 500) return [];
-    return parse11v11Matches(res.text);
-  } catch (e) {
-    console.warn(`[11v11] fetch failed for ${teamName}:`, e);
-    return [];
+  // Try several name variants — 11v11 indexes clubs under short names (e.g.
+  // "Willem II" not "Willem II Tilburg", "Twente" not "FC Twente").
+  for (const variant of teamNameVariants(teamName)) {
+    const slug = toSlug(variant);
+    const url = `${BASE}/teams/${slug}/tab/matches/`;
+    try {
+      const res = await httpGetHtml(url, { 'Accept': 'text/html' });
+      if (res.text && res.text.length >= 500) {
+        const parsed = parse11v11Matches(res.text);
+        if (parsed.length > 0) return parsed;
+      }
+    } catch (e) {
+      // try next variant
+    }
   }
+  return [];
 }
 
 /**

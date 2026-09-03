@@ -127,6 +127,23 @@ const TEAM_ALIASES: Record<string, string[]> = {
   'PSV': ['psv eindhoven', 'psv'],
   'Feyenoord': ['feyenoord rotterdam', 'feyenoord'],
   'AZ Alkmaar': ['az alkmaar', 'az'],
+  'Willem II': ['willem ii tilburg', 'willem ii', 'willem 2', 'willem'],
+  'FC Twente': ['fc twente', 'twente', 'twente enschede'],
+  'FC Utrecht': ['fc utrecht', 'utrecht'],
+  'FC Groningen': ['fc groningen', 'groningen'],
+  'Vitesse': ['vitesse arnhem', 'vitesse'],
+  'SC Heerenveen': ['sc heerenveen', 'heerenveen'],
+  'Heracles Almelo': ['heracles almelo', 'heracles'],
+  'PEC Zwolle': ['pec zwolle', 'zwolle'],
+  'NAC Breda': ['nac breda', 'nac'],
+  'Sparta Rotterdam': ['sparta rotterdam', 'sparta'],
+  'Go Ahead Eagles': ['go ahead eagles', 'go ahead'],
+  'Fortuna Sittard': ['fortuna sittard', 'fortuna'],
+  'RKC Waalwijk': ['rkc waalwijk', 'rkc'],
+  'NEC Nijmegen': ['nec nijmegen', 'nec'],
+  'Telstar': ['sc telstar', 'telstar'],
+  'FC Volendam': ['fc volendam', 'volendam'],
+  'Almere City': ['almere city fc', 'almere city', 'almere'],
 
   // ═══ Portugal ═══
   'Benfica': ['sl benfica', 'benfica', 'sport lisboa e benfica'],
@@ -463,4 +480,37 @@ export function normalizeTeamForDedup(name: string): string {
  */
 export function isSameTeam(name1: string, name2: string): boolean {
   return normalizeTeamForDedup(name1) === normalizeTeamForDedup(name2);
+}
+
+/**
+ * Return distinct candidate names to TRY when crawling a source for a team.
+ * Sources index clubs under different names (e.g. "Willem II" not "Willem II
+ * Tilburg"; "Twente" not "FC Twente"), so trying several variants greatly
+ * improves the hit rate. Order: canonical → original → aliases → core name
+ * (trailing city/qualifier stripped). Deduped, longest-first so the most
+ * specific query runs before broad ones.
+ */
+export function teamNameVariants(name: string): string[] {
+  const out = new Set<string>();
+  const add = (s?: string | null) => { const t = (s || '').trim(); if (t.length >= 3) out.add(t); };
+
+  add(name);
+  const canonical = resolveTeamName(name);
+  add(canonical);
+
+  // Pull the alias list for the canonical name (title-cased key).
+  const aliases = TEAM_ALIASES[canonical];
+  if (aliases) for (const a of aliases) add(a);
+
+  // "Core" name: strip common league prefixes and a trailing city word when the
+  // name has 3+ tokens (e.g. "Willem II Tilburg" → "Willem II"; a two-token
+  // name like "FC Twente" is left alone here — its alias handles it).
+  const stripped = name
+    .replace(/^(fc|afc|ac|sc|ss|us|rc|sv|vf[lb]|tsg|sg|cd|cf|ca)\s+/i, '')
+    .trim();
+  add(stripped);
+  const tokens = stripped.split(/\s+/);
+  if (tokens.length >= 3) add(tokens.slice(0, tokens.length - 1).join(' '));
+
+  return Array.from(out).sort((a, b) => b.length - a.length);
 }

@@ -14,6 +14,7 @@
  */
 
 import { httpGetHtml } from '../lib/http';
+import { teamNameVariants } from './team-aliases';
 import type { HistoricalMatch } from './football-data-uk';
 
 const BASE = 'https://www.soccerpunter.com';
@@ -29,24 +30,26 @@ function toSlug(team: string): string {
 
 /**
  * Fetch a team's recent results from SoccerPunter (best-effort).
- * Tries a couple of likely URL shapes; returns whatever parses.
+ * Tries several NAME variants (e.g. "Willem II Tilburg" → also "Willem II")
+ * and a couple of URL shapes each; returns the first set that parses.
  */
 export async function fetchSoccerPunterResults(teamName: string): Promise<HistoricalMatch[]> {
-  const slug = toSlug(teamName);
-  const candidates = [
-    `${BASE}/teams/${slug}`,
-    `${BASE}/team/${slug}`,
-  ];
-
-  for (const url of candidates) {
-    try {
-      const res = await httpGetHtml(url, { 'Accept': 'text/html' });
-      if (res.text && res.text.length > 800) {
-        const parsed = parseSoccerPunter(res.text);
-        if (parsed.length > 0) return parsed;
+  for (const variant of teamNameVariants(teamName)) {
+    const slug = toSlug(variant);
+    const candidates = [
+      `${BASE}/teams/${slug}`,
+      `${BASE}/team/${slug}`,
+    ];
+    for (const url of candidates) {
+      try {
+        const res = await httpGetHtml(url, { 'Accept': 'text/html' });
+        if (res.text && res.text.length > 800) {
+          const parsed = parseSoccerPunter(res.text);
+          if (parsed.length > 0) return parsed;
+        }
+      } catch {
+        // try next candidate
       }
-    } catch {
-      // try next candidate
     }
   }
   return [];

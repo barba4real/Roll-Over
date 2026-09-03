@@ -6,6 +6,7 @@
  */
 
 import { httpGet } from '../lib/http';
+import { teamNameVariants } from './team-aliases';
 
 const API_HOST = 'https://www.thesportsdb.com/api/v1/json/3';
 
@@ -161,7 +162,13 @@ export async function getTeamRecentResults(teamName: string): Promise<{
   teamId: string | null;
   results: { date: string; home: string; away: string; homeScore: number; awayScore: number; league: string }[];
 }> {
-  const team = await searchTeam(teamName);
+  // Try name variants — TheSportsDB indexes some clubs under short/local names
+  // (e.g. "Willem II" not "Willem II Tilburg").
+  let team: any = null;
+  for (const variant of teamNameVariants(teamName)) {
+    team = await searchTeam(variant);
+    if (team?.idTeam) break;
+  }
   if (!team?.idTeam) return { teamId: null, results: [] };
 
   const events = await getTeamLastEvents(team.idTeam);
