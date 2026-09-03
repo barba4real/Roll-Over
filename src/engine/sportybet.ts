@@ -38,10 +38,13 @@ const MARKET_IDS = '1,10,11,18,26,29,36,14,60100,60200';
 //   60110 = Double Chance - 1UP (early payout)
 //   50    = Home Team to Win Either Half
 //   51    = Away Team to Win Either Half
-//   900308/900309 = Home/Away Team Total Fouls (Betradar, league-gated). We also
-//                   detect fouls by group==='Fouls' + desc text, so it works
-//                   whenever SportyBet includes it even if the numeric id shifts.
-const PREFERRED_MARKET_IDS = '60200,60110,50,51,900308,900309,168,169';
+//   900544 = Home Team Fouls Over/Under (LSPORTS, group "Teams", league-gated)
+//   900545 = Away Team Fouls Over/Under (LSPORTS, group "Teams", league-gated)
+//   900342 = Match Fouls Over/Under (both teams combined, group "Match")
+// Confirmed live from the factsCenter event catalog (EPL Brentford v Sunderland).
+// We ALSO detect fouls by desc text ("...fouls...") so it keeps working even if
+// the numeric id shifts, provided the id is in this filter so the market returns.
+const PREFERRED_MARKET_IDS = '60200,60110,50,51,900544,900545,900342';
 
 export type PreferredMarketKey = '1x2_1up' | 'dc_1up' | 'win_either_half' | 'home_fouls' | 'away_fouls';
 
@@ -196,11 +199,18 @@ function classifyPreferred(m: SbMarket): { key: PreferredMarketKey; marketLabel:
   if (m.id === '50') return { key: 'win_either_half', marketLabel: 'Home Team to Win Either Half' };
   if (m.id === '51') return { key: 'win_either_half', marketLabel: 'Away Team to Win Either Half' };
 
-  // Fouls — league-gated. Detect by group/desc so it works whenever present.
-  const isFouls = group === 'fouls' || desc.includes('foul');
-  if (isFouls) {
+  // Fouls — league-gated (big leagues only, e.g. EPL/LaLiga). Confirmed ids
+  // 900544 (home) / 900545 (away); group is "Teams", desc is
+  // "Home/Away Team Fouls Over/Under". We match by id first, then fall back to
+  // desc text so it keeps working if the numeric id ever shifts.
+  if (m.id === '900544') return { key: 'home_fouls', marketLabel: 'Home Team Fouls O/U' };
+  if (m.id === '900545') return { key: 'away_fouls', marketLabel: 'Away Team Fouls O/U' };
+  if (desc.includes('foul') || group === 'fouls') {
     if (desc.includes('home')) return { key: 'home_fouls', marketLabel: 'Home Team Fouls O/U' };
     if (desc.includes('away')) return { key: 'away_fouls', marketLabel: 'Away Team Fouls O/U' };
+    // "Fouls Over/Under" with no home/away = combined match total; treat as home
+    // bucket so it still surfaces as an available fouls market to book.
+    return { key: 'home_fouls', marketLabel: 'Match Fouls O/U' };
   }
   return null;
 }
