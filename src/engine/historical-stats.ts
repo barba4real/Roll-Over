@@ -98,16 +98,58 @@ let matchDatabase: HistoricalMatch[] = [];
  * Load matches into the in-memory database.
  * Can be called multiple times to add more data (deduplicates).
  */
+/**
+ * Normalize any date string to a canonical YYYY-MM-DD key so the same match
+ * written by different sources (e.g. "2026-09-02" vs "02/09/2026") collapses
+ * to ONE row during dedup.
+ */
+function normalizeDateKey(date: string): string {
+  if (!date) return '';
+  // Already ISO: YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(date)) return date;
+  // DD/MM/YYYY or DD/MM/YY
+  const dmY = date.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (dmY) {
+    const d = dmY[1].padStart(2, '0');
+    const m = dmY[2].padStart(2, '0');
+    const y = dmY[3].length === 2 ? `20${dmY[3]}` : dmY[3];
+    return `${y}-${m}-${d}`;
+  }
+  // Fallback: try Date parse
+  const parsed = new Date(date);
+  if (!isNaN(parsed.getTime())) {
+    return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}-${String(parsed.getDate()).padStart(2, '0')}`;
+  }
+  return date; // unknown format — keep as-is
+}
+
+/**
+ * Build a canonical dedup key: team names normalized (alias-aware) + normalized
+ * date. This key is ORIENTATION-INDEPENDENT — the two teams are sorted
+ * alphabetically so "Millwall v Wrexham" and "Wrexham v Millwall" on the same
+ * date collapse to ONE match. A single fixture is one real-world event; sources
+ * that disagree on who is "home" (or that mislabel the score) must not create
+ * two contradictory rows. See mergeConflicting() for how the winner is chosen.
+ */
+function matchKey(m: HistoricalMatch): string {
+  const home = normalizeTeamForDedup(m.homeTeam);
+  const away = normalizeTeamForDedup(m.awayTeam);
+  const [a, b] = [home, away].sort();
+  return `${a}|${b}|${normalizeDateKey(m.date)}`;
+}
+
 export function loadMatches(matches: HistoricalMatch[]): number {
   const before = matchDatabase.length;
 
-  // Deduplicate by homeTeam + awayTeam + date
-  const existing = new Set(
-    matchDatabase.map(m => `${m.homeTeam.toLowerCase()}|${m.awayTeam.toLowerCase()}|${m.date}`)
-  );
+  // Deduplicate by normalized team names + normalized date
+  const existing = new Set(matchDatabase.map(matchKey));
 
   for (const match of matches) {
-    const key = `${match.homeTeam.toLowerCase()}|${match.awayTeam.toLowerCase()}|${match.date}`;
+    // Guard: skip malformed rows (missing team, or both teams identical — a
+    // common parse error that produced "Wrexham 0-2 Wrexham")
+    if (!match.homeTeam || !match.awayTeam) continue;
+    if (normalizeTeamForDedup(match.homeTeam) === normalizeTeamForDedup(match.awayTeam)) continue;
+    const key = matchKey(match);
     if (!existing.has(key)) {
       matchDatabase.push(match);
       existing.add(key);
@@ -117,6 +159,29 @@ export function loadMatches(matches: HistoricalMatch[]): number {
   const added = matchDatabase.length - before;
   console.log(`[HistoricalStats] Loaded ${added} new matches (total: ${matchDatabase.length})`);
   return added;
+}
+
+/**
+ * Clean the in-memory DB of malformed and duplicate rows. Call after hydrating
+ * from SQLite so pre-existing bad data (same-team rows, date-format duplicates)
+ * is purged from what the UI reads.
+ */
+export function cleanDatabase(): number {
+  const before = matchDatabase.length;
+  const seen = new Set<string>();
+  const cleaned: HistoricalMatch[] = [];
+  for (const m of matchDatabase) {
+    if (!m.homeTeam || !m.awayTeam) continue;
+    if (normalizeTeamForDedup(m.homeTeam) === normalizeTeamForDedup(m.awayTeam)) continue;
+    const key = matchKey(m);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    cleaned.push(m);
+  }
+  matchDatabase = cleaned;
+  const removed = before - matchDatabase.length;
+  if (removed > 0) console.log(`[HistoricalStats] Cleaned ${removed} malformed/duplicate rows`);
+  return removed;
 }
 
 /**

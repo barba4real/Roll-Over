@@ -121,7 +121,7 @@ export function computeMatchIntelligence(
 
 // ─── Data Retrieval ──────────────────────────────────────────────────────────
 
-function getTeamMatches(team: string, allMatches: HistoricalMatch[], limit: number): FormMatch[] {
+export function getTeamMatches(team: string, allMatches: HistoricalMatch[], limit: number): FormMatch[] {
   const matches = allMatches
     .filter(m => isSameTeam(m.homeTeam, team) || isSameTeam(m.awayTeam, team))
     .sort((a, b) => compareDates(b.date, a.date)) // Most recent first

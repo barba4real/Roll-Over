@@ -188,17 +188,24 @@ export async function getMatchAnalysis(
   if (awayForm.matches.length > 0) dataSources.push(`Away: ${awayForm.matches.length} matches`);
   if (h2h.meetings.length > 0 && !dataSources.some(s => s.includes('H2H'))) dataSources.push(`H2H: ${h2h.meetings.length} meetings`);
 
-  // ─── Step 3: Standings (always live from ESPN/Football-Data.org) ──────────
+  // ─── Step 3: Standings — try ESPN, then Football-Data.org, then derive from
+  // the local results DB so any league with enough data still shows a table ───
   let standings: StandingsData | null = null;
   if (resolvedLeagueId) {
     standings = await fetchStandings(resolvedLeagueId, homeTeam, awayTeam);
     if (standings) dataSources.push(`Standings: ${standings.source}`);
 
-    // Fallback to Football-Data.org
     if (!standings) {
       standings = await fetchFootballDataStandings(resolvedLeagueId, homeTeam, awayTeam);
       if (standings) dataSources.push(`Standings: ${standings.source}`);
     }
+  }
+
+  // Final fallback: build a standings table from the local DB results. Works for
+  // ANY league (ESPN-unknown ones included) as long as we have enough matches.
+  if (!standings) {
+    standings = buildStandingsFromDb(homeTeam, awayTeam);
+    if (standings) dataSources.push(`Standings: ${standings.source}`);
   }
 
   // ─── Step 4: Prediction (runs against all collected data) ────────────────
@@ -464,6 +471,88 @@ async function fetchFootballDataStandings(
   } catch {
     return null;
   }
+}
+
+// ─── DB-derived Standings (final fallback, works for ANY league) ─────────────
+
+/**
+ * Build a standings table from the local results DB. Aggregates W/D/L/points
+ * from stored matches within the current season. Works for leagues ESPN and
+ * Football-Data don't cover, as long as the crawl has populated results.
+ * Only the two teams' league peers are included (matches sharing their leagueId).
+ */
+function buildStandingsFromDb(homeTeam: string, awayTeam: string): StandingsData | null {
+  const all = getAllMatches();
+  if (all.length === 0) return null;
+
+  // Find the leagueId most associated with these two teams
+  const relevant = all.filter(m =>
+    fuzzyMatch(m.homeTeam, homeTeam) || fuzzyMatch(m.awayTeam, homeTeam) ||
+    fuzzyMatch(m.homeTeam, awayTeam) || fuzzyMatch(m.awayTeam, awayTeam)
+  );
+  if (relevant.length === 0) return null;
+
+  // Pick the dominant leagueId + latest season among relevant matches
+  const leagueCount = new Map<string, number>();
+  for (const m of relevant) leagueCount.set(m.leagueId, (leagueCount.get(m.leagueId) || 0) + 1);
+  const leagueId = [...leagueCount.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  if (!leagueId) return null;
+
+  const seasons = relevant.map(m => m.season).filter(Boolean).sort();
+  const season = seasons[seasons.length - 1] || '';
+
+  // Aggregate all matches in that league+season
+  const leagueMatches = all.filter(m => m.leagueId === leagueId && (!season || m.season === season));
+  if (leagueMatches.length < 4) return null; // too little to be a meaningful table
+
+  interface Agg { team: string; p: number; w: number; d: number; l: number; gf: number; ga: number; pts: number; }
+  const tbl = new Map<string, Agg>();
+  const ensure = (team: string): Agg => {
+    const k = team.toLowerCase();
+    if (!tbl.has(k)) tbl.set(k, { team, p: 0, w: 0, d: 0, l: 0, gf: 0, ga: 0, pts: 0 });
+    return tbl.get(k)!;
+  };
+
+  for (const m of leagueMatches) {
+    if (!m.homeTeam || !m.awayTeam || m.homeTeam.toLowerCase() === m.awayTeam.toLowerCase()) continue;
+    const h = ensure(m.homeTeam);
+    const a = ensure(m.awayTeam);
+    h.p++; a.p++;
+    h.gf += m.ftHomeGoals; h.ga += m.ftAwayGoals;
+    a.gf += m.ftAwayGoals; a.ga += m.ftHomeGoals;
+    if (m.ftHomeGoals > m.ftAwayGoals) { h.w++; h.pts += 3; a.l++; }
+    else if (m.ftHomeGoals < m.ftAwayGoals) { a.w++; a.pts += 3; h.l++; }
+    else { h.d++; a.d++; h.pts++; a.pts++; }
+  }
+
+  const rows: StandingsRow[] = [...tbl.values()]
+    .map(agg => ({
+      position: 0,
+      team: agg.team,
+      played: agg.p,
+      won: agg.w,
+      drawn: agg.d,
+      lost: agg.l,
+      goalsFor: agg.gf,
+      goalsAgainst: agg.ga,
+      goalDifference: agg.gf - agg.ga,
+      points: agg.pts,
+      form: [],
+      isHome: fuzzyMatch(agg.team, homeTeam),
+      isAway: fuzzyMatch(agg.team, awayTeam),
+    }))
+    .sort((a, b) => b.points - a.points || b.goalDifference - a.goalDifference);
+  rows.forEach((r, i) => r.position = i + 1);
+
+  if (rows.length < 3) return null;
+
+  return {
+    leagueName: leagueId,
+    table: rows,
+    homePosition: rows.find(r => r.isHome)?.position || null,
+    awayPosition: rows.find(r => r.isAway)?.position || null,
+    source: 'Local DB (computed)',
+  };
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

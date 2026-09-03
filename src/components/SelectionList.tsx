@@ -67,15 +67,38 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
     return Array.from(cats).sort();
   }, [selections]);
 
-  const uniqueDates = useMemo(() => {
-    const dates = new Set(selections.map(s => s.date));
-    return Array.from(dates).sort();
+  // Group selections by their real calendar day (from kickOffDateTime), sorted
+  // chronologically. Each entry: { key: 'YYYY-MM-DD', label: 'Tue 02 Sep', count }
+  const dayGroups = useMemo(() => {
+    const map = new Map<string, { key: string; label: string; count: number; ts: number }>();
+    for (const s of selections) {
+      const d = s.kickOffDateTime ? new Date(s.kickOffDateTime) : null;
+      if (!d || isNaN(d.getTime())) continue;
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      if (!map.has(key)) {
+        const label = d.toLocaleDateString(undefined, { weekday: 'short', day: '2-digit', month: 'short' });
+        map.set(key, { key, label, count: 0, ts: new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() });
+      }
+      map.get(key)!.count++;
+    }
+    return Array.from(map.values()).sort((a, b) => a.ts - b.ts);
   }, [selections]);
 
   const filtered = selections.filter(s => {
     const pickMatch = pickFilter === 'all' || s.pick === pickFilter;
     const catMatch = marketFilter === 'all' || getMarketCategory(s) === marketFilter;
-    const dateMatch = dateFilter === 'all' || s.date === dateFilter;
+
+    // Day filter — compare the selection's real calendar day to the chosen day key
+    let dateMatch = true;
+    if (dateFilter !== 'all') {
+      const d = s.kickOffDateTime ? new Date(s.kickOffDateTime) : null;
+      if (!d || isNaN(d.getTime())) {
+        dateMatch = false;
+      } else {
+        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        dateMatch = key === dateFilter;
+      }
+    }
 
     // Date range filter
     let rangeMatch = true;
@@ -224,8 +247,9 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
           <button
             onClick={() => onUseFiltered(filtered)}
             className="text-xs px-2 py-0.5 bg-green-700 hover:bg-green-600 rounded text-white font-medium"
+            title="Build slips from just these picks — your full list stays intact"
           >
-            Use {filtered.length} for Slip Builder
+            Build slips from these {filtered.length}
           </button>
         )}
 
@@ -234,24 +258,39 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
         </span>
       </div>
 
-      {/* Date filter & Sort */}
-      <div className="flex gap-2 mb-2 items-center flex-wrap">
-        <div className="flex items-center gap-1">
-          <span className="text-xs text-gray-500">Date:</span>
-          <select
-            value={dateFilter}
-            onChange={(e) => setDateFilter(e.target.value)}
-            className="px-2 py-0.5 bg-gray-800 border border-gray-600 rounded text-xs text-gray-300 focus:outline-none focus:border-blue-500"
-          >
-            <option value="all">All</option>
-            {uniqueDates.map(d => (
-              <option key={d} value={d}>
-                {d} ({selections.filter(s => s.date === d).length})
-              </option>
+      {/* Day chips — one-click filter by calendar day (chronological) */}
+      {dayGroups.length > 1 && (
+        <div className="mb-2">
+          <div className="flex items-center gap-1 mb-1">
+            <span className="text-xs text-gray-500">Days:</span>
+            <span className="text-[10px] text-gray-600">{dayGroups.length} match-days · click to filter</span>
+          </div>
+          <div className="flex gap-1 flex-wrap max-h-24 overflow-y-auto">
+            <button
+              onClick={() => setDateFilter('all')}
+              className={`px-2 py-1 rounded text-xs whitespace-nowrap ${
+                dateFilter === 'all' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+              }`}
+            >
+              All ({selections.length})
+            </button>
+            {dayGroups.map(g => (
+              <button
+                key={g.key}
+                onClick={() => setDateFilter(dateFilter === g.key ? 'all' : g.key)}
+                className={`px-2 py-1 rounded text-xs whitespace-nowrap ${
+                  dateFilter === g.key ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+                }`}
+              >
+                {g.label} <span className={dateFilter === g.key ? 'text-blue-200' : 'text-gray-500'}>({g.count})</span>
+              </button>
             ))}
-          </select>
+          </div>
         </div>
+      )}
 
+      {/* Date range & Sort */}
+      <div className="flex gap-2 mb-2 items-center flex-wrap">
         {/* Date Range */}
         <div className="flex items-center gap-1">
           <span className="text-xs text-gray-500">From:</span>

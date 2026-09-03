@@ -243,6 +243,9 @@ export async function loadMatchesFromDb(): Promise<number> {
   for (const team of teams) markTeamFresh(team);
 
   loadMatches(matches);
+  // Purge any pre-existing malformed/duplicate rows (same-team, date-format dupes)
+  const { cleanDatabase } = await import('../engine/historical-stats');
+  cleanDatabase();
   return matches.length;
 }
 

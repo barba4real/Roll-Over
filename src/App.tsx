@@ -40,6 +40,10 @@ type View = 'home' | 'paste' | 'search' | 'slips' | 'history' | 'fouls';
 export default function App() {
   const [view, setView] = useState<View>('home');
   const [selections, setSelections] = useState<ParsedSelection[]>(() => loadSelections());
+  // Optional subset the Slip Builder uses (e.g. one day's picks filtered from the
+  // master pool). null = builder uses the full selections list. This lets the
+  // master 2-week pool stay intact while you build one day at a time.
+  const [builderPool, setBuilderPool] = useState<ParsedSelection[] | null>(null);
   const [generatedSlips, setGeneratedSlips] = useState<Slip[]>(() => loadGeneratedSlips());
   const [stakedSlips, setStagedSlips] = useState<StakedSlip[]>(() => loadStakedSlips());
   const [history, setHistory] = useState<StakedSlip[]>(() => loadHistory());
@@ -1149,7 +1153,9 @@ export default function App() {
                       setSelections(prev => prev.filter(s => s.id !== selId));
                     }}
                     onUseFiltered={(filtered) => {
-                      setSelections(filtered);
+                      // Non-destructive: scope the builder to this subset (e.g. one
+                      // day) while keeping the full master pool intact.
+                      setBuilderPool(filtered);
                     }}
                     onExportSelections={handleExportSelections}
                     onImportSelections={handleImportSelections}
@@ -1217,13 +1223,25 @@ export default function App() {
 
             <div className="w-96 p-4 overflow-y-auto">
               {selections.length > 0 && (
-                <SlipGenerator
-                  selections={selections}
-                  onGenerated={setGeneratedSlips}
-                  /* No scores passed — Paste & Build is pure distribution of YOUR
-                     hand-studied predictions. The prediction/scoring engine belongs
-                     to the Scout workflow only, never here. */
-                />
+                <>
+                  {builderPool && (
+                    <div className="mb-2 p-2 bg-blue-900/30 border border-blue-800 rounded text-xs text-blue-300 flex items-center justify-between">
+                      <span>Builder scoped to {builderPool.length} selected picks (of {selections.length})</span>
+                      <button
+                        onClick={() => setBuilderPool(null)}
+                        className="px-2 py-0.5 bg-gray-700 hover:bg-gray-600 rounded text-gray-300"
+                      >
+                        Use all
+                      </button>
+                    </div>
+                  )}
+                  <SlipGenerator
+                    selections={builderPool ?? selections}
+                    onGenerated={setGeneratedSlips}
+                    /* No scores passed — Paste & Build is pure distribution of YOUR
+                       hand-studied predictions. Prediction/scoring belongs to Scout. */
+                  />
+                </>
               )}
             </div>
           </div>

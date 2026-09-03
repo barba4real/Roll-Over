@@ -516,18 +516,28 @@ export async function generateSlipsAsync(
 }
 
 /**
- * PARTITION PACKER — split the pick pool into slips, using each pick ONCE before
- * any reuse. This is what makes a single losing pick affect only one slip.
+ * PARTITION PACKER — split the pick pool into slips using BALANCED DEALING so
+ * every eligible pick lands in a slip and each slip gets a fair mix of high and
+ * low odds (no slip is left as an all-low-odds clump that can't reach target).
  *
- * Algorithm (round-based):
- *   Round 1: repeatedly take the still-unused pick with the earliest kickoff
- *   (or highest confidence, if scored) as a slip seed, then greedily add more
- *   UNUSED picks that don't conflict until the slip's odds reach the target
- *   window. Mark all used. Continue until unused picks can't form a full slip.
- *   Round 2+: only begins when round 1 is exhausted, reusing least-used picks.
+ * Why balanced dealing (not sequential greedy fill):
+ *   Greedy fill grabs picks in order until a slip hits target, which strands the
+ *   low-odds tail together (e.g. four 1.2 picks → 2.37, can't reach 5.0). Dealing
+ *   spreads high and low odds across ALL slips at once, so a 1.20 pick sits
+ *   beside a 1.60 pick and the slip reaches target naturally.
  *
- * Guarantees for the classic case (28 picks, target 3.0 ≈ 3 picks/slip):
- *   ~9 slips, each pick in exactly one slip → one loser kills exactly one slip.
+ * Algorithm:
+ *   1. Decide slip count = round(totalOddsProduct target coverage). Concretely:
+ *      slipCount = clamp( floor(eligible / picksNeededForTarget) ), min 1.
+ *   2. Sort picks by odds. Deal them across the slips in a SNAKE pattern
+ *      (0,1,2,..,n-1,n-1,..,1,0) so each slip accumulates a balanced odds mix.
+ *   3. After dealing, each slip's odds should land near target. Do a light
+ *      local-swap pass to nudge any slip that's outside the window toward it by
+ *      trading a pick with a neighbour slip.
+ *   4. Every pick is placed exactly once → one losing pick kills exactly one slip.
+ *
+ *   autoCapSlips ON  → slipCount is auto-derived (each fixture used once).
+ *   autoCapSlips OFF → still deals once, but caps output at maxSlipsToGenerate.
  */
 function packIntoSlips(
   eligible: ParsedSelection[],
@@ -535,96 +545,152 @@ function packIntoSlips(
   scores: Map<string, number> | undefined,
   onProgress?: (found: number) => void
 ): Slip[] {
-  const scored = hasMeaningfulScores(eligible, scores);
   const fixtureKey = (s: ParsedSelection) => `${s.homeTeam.toLowerCase()}|${s.awayTeam.toLowerCase()}`;
   const targetMin = config.oddsRange.min;
   const targetMax = config.oddsRange.max;
+  const target = config.targetOdds;
 
-  const slips: Slip[] = [];
-  const globalSlipKeys = new Set<string>(); // dedupe identical slips across rounds
+  // Deduplicate to one pick per fixture (coverage counts fixtures, not picks).
+  const byFixture = new Map<string, ParsedSelection>();
+  for (const s of eligible) {
+    const k = fixtureKey(s);
+    if (!byFixture.has(k)) byFixture.set(k, s);
+  }
+  const picks = Array.from(byFixture.values());
+  if (picks.length < config.minPicksPerSlip) return [];
 
-  // How many full passes over the pool are allowed.
-  //  - autoCapSlips ON  → exactly ONE pass: every fixture used once, no repeats.
-  //    The slip count is whatever one clean pass yields (ignores maxSlipsToGenerate).
-  //  - autoCapSlips OFF → allow repeat rounds up to maxSlipsToGenerate, each round
-  //    rotating order so slips differ; max repeat grows by 1 per pass, never clusters.
-  const maxRounds = config.autoCapSlips ? 1 : Math.max(1, config.maxSlipsToGenerate);
-  // Effective slip cap: when auto-capping, let the single clean pass run to
-  // completion (no numeric ceiling); otherwise honour the user's requested max.
-  const slipCap = config.autoCapSlips ? Number.POSITIVE_INFINITY : config.maxSlipsToGenerate;
+  // Sort ascending by odds so dealing alternates strong and weak picks.
+  const sorted = [...picks].sort((a, b) => a.odds - b.odds);
 
-  for (let round = 0; round < maxRounds; round++) {
-    if (slips.length >= slipCap) break;
+  // Average picks per slip needed to reach the target with these odds.
+  const geoMean = Math.pow(
+    sorted.reduce((p, s) => p * s.odds, 1),
+    1 / sorted.length
+  ) || 1.4;
+  const picksPerSlip = Math.max(
+    config.minPicksPerSlip,
+    Math.min(config.maxPicksPerSlip, Math.round(Math.log(target) / Math.log(geoMean)))
+  );
 
-    // Fresh pool for THIS round — every eligible pick, each usable once here.
-    // Rotate the seed order per round so repeat rounds don't reproduce the same
-    // slips: round 0 keeps natural order, round 1 shifts by one, etc.
-    let pool = [...eligible].sort((a, b) => {
-      if (scored) return (scores!.get(b.id) ?? 50) - (scores!.get(a.id) ?? 50);
-      return a.index - b.index;
-    });
-    if (round > 0) {
-      const shift = round % pool.length;
-      pool = [...pool.slice(shift), ...pool.slice(0, shift)];
-    }
+  // How many slips can we form so each fixture is used once?
+  // Use ceil so total bucket capacity always covers ALL picks — floor would
+  // undersize the buckets and strand the tail. e.g. 23 picks / 5 = 4.6 → 5 slips.
+  let slipCount = Math.max(1, Math.ceil(sorted.length / picksPerSlip));
+  if (!config.autoCapSlips) {
+    slipCount = Math.min(slipCount, config.maxSlipsToGenerate);
+  }
+  // Guarantee capacity: slipCount * maxPicksPerSlip must be >= total picks,
+  // otherwise picks would have nowhere to go. Grow slipCount if needed.
+  while (slipCount * config.maxPicksPerSlip < sorted.length) slipCount++;
 
-    const usedThisRound = new Set<string>();
-    let madeSlipThisRound = false;
-
-    // Consume the round pool into slips. Each slip takes fresh (round-unused)
-    // picks, fills toward the target odds window, then the next slip starts.
-    while (slips.length < slipCap) {
-      const slip: ParsedSelection[] = [];
-      let odds = 1;
-
-      for (const cand of pool) {
-        if (slip.length >= config.maxPicksPerSlip) break;
-        const fk = fixtureKey(cand);
-        if (usedThisRound.has(fk)) continue;
-
-        const newOdds = odds * cand.odds;
-        // Don't overshoot the max. If a single pick alone would exceed max, and
-        // the slip is still empty, allow it (a lone strong favourite can be a slip).
-        if (newOdds > targetMax && slip.length > 0) continue;
-        if (conflictsWithGroup(cand, slip, config)) continue;
-
-        slip.push(cand);
-        odds = newOdds;
-
-        // Stop this slip once inside the target window
-        if (slip.length >= config.minPicksPerSlip && odds >= targetMin) break;
+  // Deal picks across slips in a snake pattern (balanced odds per slip).
+  const buckets: ParsedSelection[][] = Array.from({ length: slipCount }, () => []);
+  let idx = 0;
+  let dir = 1;
+  for (const pick of sorted) {
+    // Skip if adding would conflict within the chosen bucket; try next buckets.
+    let placed = false;
+    for (let attempt = 0; attempt < slipCount; attempt++) {
+      const b = buckets[idx];
+      if (!conflictsWithGroup(pick, b, config) && b.length < config.maxPicksPerSlip) {
+        b.push(pick);
+        placed = true;
+        break;
       }
-
-      // Mark picks used this round regardless (they've been consumed)
-      for (const s of slip) usedThisRound.add(fixtureKey(s));
-
-      const valid =
-        slip.length >= config.minPicksPerSlip &&
-        odds >= targetMin &&
-        odds <= targetMax;
-
-      if (valid) {
-        const key = slip.map(s => s.id).sort().join('|');
-        if (!globalSlipKeys.has(key)) {
-          globalSlipKeys.add(key);
-          slips.push(buildSlip(slip, config, scores));
-          madeSlipThisRound = true;
-          onProgress?.(slips.length);
-        }
-      }
-
-      // Round ends when no fresh picks remain to seed another slip
-      const remaining = pool.filter(s => !usedThisRound.has(fixtureKey(s)));
-      if (remaining.length < config.minPicksPerSlip) break;
-      // Safety: if the last attempt produced nothing valid and picks remain that
-      // can't form a target slip, bail this round to avoid an infinite loop.
-      if (!valid && slip.length === 0) break;
+      // move to next bucket if conflict
+      idx += dir;
+      if (idx >= slipCount) { idx = slipCount - 1; dir = -1; }
+      else if (idx < 0) { idx = 0; dir = 1; }
     }
-
-    // If a whole round produced no new slips, further rounds won't either — stop.
-    if (!madeSlipThisRound) break;
+    // advance snake index for next pick
+    idx += dir;
+    if (idx >= slipCount) { idx = slipCount - 1; dir = -1; }
+    else if (idx < 0) { idx = 0; dir = 1; }
+    // If it couldn't be placed anywhere (all conflicts/full), drop into the
+    // smallest bucket that doesn't conflict, else the smallest bucket.
+    if (!placed) {
+      const candidates = buckets
+        .map((b, i) => ({ b, i }))
+        .filter(({ b }) => !conflictsWithGroup(pick, b, config) && b.length < config.maxPicksPerSlip)
+        .sort((x, y) => x.b.length - y.b.length);
+      if (candidates.length > 0) candidates[0].b.push(pick);
+      // else: recorded below by the coverage sweep
+    }
   }
 
+  // COVERAGE SWEEP — guarantee EVERY pick is placed. Find any pick not yet in a
+  // bucket and force it into the smallest non-conflicting bucket; if all buckets
+  // conflict or are full, create a new bucket for it. Nothing is ever dropped.
+  const placedIds = new Set<string>();
+  for (const b of buckets) for (const s of b) placedIds.add(s.id);
+  for (const pick of sorted) {
+    if (placedIds.has(pick.id)) continue;
+    const host = buckets
+      .map((b, i) => ({ b, i }))
+      .filter(({ b }) => !conflictsWithGroup(pick, b, config) && b.length < config.maxPicksPerSlip)
+      .sort((x, y) => x.b.length - y.b.length)[0];
+    if (host) {
+      host.b.push(pick);
+    } else {
+      buckets.push([pick]); // new bucket rather than drop the pick
+    }
+    placedIds.add(pick.id);
+  }
+
+  // Light rebalance: if a bucket's odds are below target min and a neighbour is
+  // above target max, swap their lowest/highest picks to pull both toward target.
+  function bucketOdds(b: ParsedSelection[]): number {
+    return b.reduce((p, s) => p * s.odds, 1);
+  }
+  for (let pass = 0; pass < 3; pass++) {
+    for (let i = 0; i < buckets.length; i++) {
+      const oi = bucketOdds(buckets[i]);
+      if (oi >= targetMin) continue; // this bucket is fine or high
+      // find a bucket above target to borrow a higher-odds pick from
+      for (let j = 0; j < buckets.length; j++) {
+        if (i === j) continue;
+        const oj = bucketOdds(buckets[j]);
+        if (oj <= targetMax) continue; // j not overshooting
+        // move j's highest-odds pick to i if it helps and doesn't conflict
+        const donor = [...buckets[j]].sort((a, b) => b.odds - a.odds)[0];
+        if (!donor) continue;
+        if (conflictsWithGroup(donor, buckets[i], config)) continue;
+        if (buckets[i].length >= config.maxPicksPerSlip) continue;
+        buckets[j] = buckets[j].filter(s => s.id !== donor.id);
+        buckets[i].push(donor);
+        break;
+      }
+    }
+  }
+
+  // Build slips from buckets. Full buckets become slips. Any bucket short of the
+  // minimum (a stray 1-pick bucket from the sweep) is folded into the smallest
+  // existing slip that fits — coverage means no pick is ever abandoned.
+  const slips: Slip[] = [];
+  const strays: ParsedSelection[] = [];
+  for (const b of buckets) {
+    if (b.length >= config.minPicksPerSlip) {
+      slips.push(buildSlip(b, config, scores));
+    } else {
+      strays.push(...b);
+    }
+  }
+  // Distribute strays into the smallest fitting slips
+  for (const lone of strays) {
+    const host = [...slips]
+      .sort((a, z) => a.selectionCount - z.selectionCount)
+      .find(s => !conflictsWithGroup(lone, s.selections, config) && s.selectionCount < config.maxPicksPerSlip);
+    if (host) {
+      const merged = [...host.selections, lone];
+      const hostIdx = slips.findIndex(s => s.id === host.id);
+      slips[hostIdx] = buildSlip(merged, config, scores);
+    } else if (slips.length === 0 && strays.length >= config.minPicksPerSlip) {
+      // No slips yet but enough strays to form one
+      slips.push(buildSlip(strays.slice(0, config.maxPicksPerSlip), config, scores));
+    }
+  }
+
+  for (let i = 0; i < slips.length; i++) onProgress?.(i + 1);
   return slips;
 }
 

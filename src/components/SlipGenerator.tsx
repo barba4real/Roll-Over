@@ -127,6 +127,40 @@ export default function SlipGenerator({ selections, onGenerated, scores }: Props
   // How many pasted fixtures have already started (excluded when futureOnly is on)
   const pastCount = countPastFixtures(selections);
 
+  // Available match-days from the pool (chronological), for the reliable Day picker
+  const availableDays = (() => {
+    const map = new Map<string, { key: string; label: string; count: number; ts: number }>();
+    for (const s of selections) {
+      const d = s.kickOffDateTime ? new Date(s.kickOffDateTime) : null;
+      if (!d || isNaN(d.getTime())) continue;
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      if (!map.has(key)) {
+        map.set(key, {
+          key,
+          label: d.toLocaleDateString(undefined, { weekday: 'short', day: '2-digit', month: 'short' }),
+          count: 0,
+          ts: new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(),
+        });
+      }
+      map.get(key)!.count++;
+    }
+    return Array.from(map.values()).sort((a, b) => a.ts - b.ts);
+  })();
+
+  // Set the kickoff window to a full calendar day (00:00–23:59 of that day)
+  function setWindowToDay(dayKey: string) {
+    if (!dayKey) { setConfig({ ...config, kickoffFrom: undefined, kickoffTo: undefined }); return; }
+    setConfig({ ...config, kickoffFrom: `${dayKey}T00:00`, kickoffTo: `${dayKey}T23:59` });
+  }
+
+  // Which day (if any) the current window represents
+  const currentDayKey = (() => {
+    if (config.kickoffFrom && config.kickoffFrom.endsWith('T00:00') && config.kickoffTo?.endsWith('T23:59')) {
+      return config.kickoffFrom.slice(0, 10);
+    }
+    return '';
+  })();
+
   // Estimate how many ZERO-REPEAT slips one clean pass yields: eligible picks
   // divided by the average picks needed to reach the target odds. This tells the
   // user the ideal slip count where every fixture is used exactly once.
@@ -273,26 +307,51 @@ export default function SlipGenerator({ selections, onGenerated, scores }: Props
               </button>
             )}
           </div>
-          <div className="flex gap-2 items-center">
-            <div className="flex-1">
-              <span className="text-[10px] text-gray-500 block">From</span>
-              <input
-                type="datetime-local"
-                value={config.kickoffFrom || ''}
-                onChange={(e) => setConfig({ ...config, kickoffFrom: e.target.value || undefined })}
-                className="w-full px-2 py-1 bg-gray-900 border border-gray-600 rounded text-xs text-gray-300 focus:outline-none focus:border-blue-500"
-              />
+          {/* Reliable Day picker (dropdown — no calendar popup needed) */}
+          {availableDays.length > 0 && (
+            <div className="mb-2">
+              <span className="text-[10px] text-gray-500 block mb-1">Pick a day (whole-day window)</span>
+              <select
+                value={currentDayKey}
+                onChange={(e) => setWindowToDay(e.target.value)}
+                className="w-full px-2 py-1.5 bg-gray-900 border border-gray-600 rounded text-xs text-gray-300 focus:outline-none focus:border-blue-500"
+              >
+                <option value="">All days (no window)</option>
+                {availableDays.map(d => (
+                  <option key={d.key} value={d.key}>{d.label} — {d.count} fixtures</option>
+                ))}
+              </select>
             </div>
-            <div className="flex-1">
-              <span className="text-[10px] text-gray-500 block">To</span>
-              <input
-                type="datetime-local"
-                value={config.kickoffTo || ''}
-                onChange={(e) => setConfig({ ...config, kickoffTo: e.target.value || undefined })}
-                className="w-full px-2 py-1 bg-gray-900 border border-gray-600 rounded text-xs text-gray-300 focus:outline-none focus:border-blue-500"
-              />
+          )}
+
+          {/* Manual time range (advanced) — type values directly; the native
+              calendar popup is unreliable in the desktop webview, so these are
+              typeable text fields formatted as YYYY-MM-DDTHH:MM */}
+          <details className="mb-1">
+            <summary className="text-[10px] text-gray-500 cursor-pointer hover:text-gray-400">Advanced: exact time range</summary>
+            <div className="flex gap-2 items-center mt-1">
+              <div className="flex-1">
+                <span className="text-[10px] text-gray-500 block">From</span>
+                <input
+                  type="text"
+                  placeholder="YYYY-MM-DD HH:MM"
+                  value={config.kickoffFrom ? config.kickoffFrom.replace('T', ' ') : ''}
+                  onChange={(e) => setConfig({ ...config, kickoffFrom: e.target.value ? e.target.value.replace(' ', 'T') : undefined })}
+                  className="w-full px-2 py-1 bg-gray-900 border border-gray-600 rounded text-xs text-gray-300 focus:outline-none focus:border-blue-500 font-mono"
+                />
+              </div>
+              <div className="flex-1">
+                <span className="text-[10px] text-gray-500 block">To</span>
+                <input
+                  type="text"
+                  placeholder="YYYY-MM-DD HH:MM"
+                  value={config.kickoffTo ? config.kickoffTo.replace('T', ' ') : ''}
+                  onChange={(e) => setConfig({ ...config, kickoffTo: e.target.value ? e.target.value.replace(' ', 'T') : undefined })}
+                  className="w-full px-2 py-1 bg-gray-900 border border-gray-600 rounded text-xs text-gray-300 focus:outline-none focus:border-blue-500 font-mono"
+                />
+              </div>
             </div>
-          </div>
+          </details>
           {(() => {
             const inWindow = getEligible(selections, config).length;
             return (

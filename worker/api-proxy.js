@@ -45,6 +45,10 @@ const ALLOWED_DOMAINS = [
   'skysports.com',
   'oddsmeter.com',
   'www.oddsmeter.com',
+  'www.11v11.com',
+  '11v11.com',
+  'www.soccerpunter.com',
+  'soccerpunter.com',
 ];
 
 export default {
