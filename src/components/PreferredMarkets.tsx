@@ -119,7 +119,7 @@ export default function PreferredMarkets({ onImport }: Props) {
       <div className="flex items-center justify-between mb-3">
         <div>
           <h3 className="text-md font-semibold text-green-400">Preferred Markets Scout</h3>
-          <p className="text-[11px] text-gray-500">Fixtures that offer your signature picks on SportyBet — with live lines &amp; odds.</p>
+          <p className="text-[11px] text-gray-500">Fixtures offering your signature picks on SportyBet — live lines &amp; odds. Team-fouls markets are shown even when 🔒 locked (they usually unlock a few hours pre-kickoff) so you can pre-stage and pounce.</p>
         </div>
         <button
           onClick={handleScan}
@@ -216,17 +216,28 @@ export default function PreferredMarkets({ onImport }: Props) {
                     <div key={i} className="flex items-center justify-between text-[11px] py-1 border-b border-gray-800 last:border-0">
                       <div className="flex items-center gap-2">
                         <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold ${marketColor(r.key)}`}>{r.marketLabel}</span>
-                        <span className="text-gray-200 font-medium">{r.line}</span>
+                        <span className={`font-medium ${r.locked ? 'text-gray-400' : 'text-gray-200'}`}>{r.line}</span>
+                        {r.locked && (
+                          <span
+                            className="text-[9px] px-1 py-0.5 rounded bg-gray-700 text-gray-400"
+                            title="Market currently locked. SportyBet usually unlocks team-fouls markets a few hours before kickoff — this is pre-staged so you can act the moment it opens."
+                          >
+                            🔒 locked
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-2">
-                        <span className="text-yellow-400 font-mono">@{r.odds.toFixed(2)}</span>
+                        {r.locked
+                          ? <span className="text-gray-500 font-mono">@—</span>
+                          : <span className="text-yellow-400 font-mono">@{r.odds.toFixed(2)}</span>}
                         {onImport && (
                           <button
                             onClick={() => importRow(fx, i)}
-                            disabled={done}
-                            className="text-[10px] px-1.5 py-0.5 bg-gray-700 hover:bg-blue-700 disabled:text-gray-600 rounded text-gray-300"
+                            disabled={done || r.locked}
+                            className="text-[10px] px-1.5 py-0.5 bg-gray-700 hover:bg-blue-700 disabled:text-gray-600 disabled:bg-gray-800 rounded text-gray-300"
+                            title={r.locked ? 'Locked — no price yet. Import enabled once it unlocks.' : 'Add to slip'}
                           >
-                            {done ? '✓' : '+ Slip'}
+                            {done ? '✓' : r.locked ? '🔒' : '+ Slip'}
                           </button>
                         )}
                       </div>

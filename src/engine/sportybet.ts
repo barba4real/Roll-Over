@@ -53,6 +53,9 @@ export interface PreferredMarketRow {
   marketLabel: string;             // e.g. "Home Team Fouls O/U"
   line: string;                    // e.g. "Under 13.5" (full outcome desc)
   odds: number;
+  locked: boolean;                 // market suspended (status!=0) or outcome !isActive.
+                                   // Fouls unlock a few hours pre-kickoff, so we still
+                                   // list them locked to pre-stage the pick.
 }
 
 export interface PreferredFixture {
@@ -260,17 +263,38 @@ export async function fetchPreferredMarkets(opts?: {
 
         const rows: PreferredMarketRow[] = [];
         for (const m of ev.markets || []) {
-          if (m.status && m.status !== 0) continue;
           const cls = classifyPreferred(m);
           if (!cls) continue;
+          const isFouls = cls.key === 'home_fouls' || cls.key === 'away_fouls';
+          const marketLocked = !!(m.status && m.status !== 0);
+          // Non-fouls preferred markets: keep the tight rule (skip suspended
+          // markets) since those are broadly available anyway. Fouls: surface
+          // even when the whole market is suspended, because it typically stays
+          // locked until a few hours before kickoff and we want it pre-staged.
+          if (marketLocked && !isFouls) continue;
           for (const oc of m.outcomes || []) {
-            if (!oc.isActive) continue;
+            const active = !!oc.isActive;
             const odds = parseFloat(oc.odds);
-            if (!isFinite(odds) || odds < 1.01) continue;
-            rows.push({ key: cls.key, marketLabel: cls.marketLabel, line: (oc.desc || '').trim(), odds: Math.round(odds * 100) / 100 });
+            const hasPrice = isFinite(odds) && odds >= 1.01;
+            const locked = marketLocked || !active || !hasPrice;
+            // For fouls we keep locked lines (they carry the line label even
+            // with no live price). For everything else we require a real price.
+            if (!isFouls && locked) continue;
+            if (isFouls && !oc.desc) continue; // need at least the line label
+            rows.push({
+              key: cls.key,
+              marketLabel: cls.marketLabel,
+              line: (oc.desc || '').trim(),
+              odds: hasPrice ? Math.round(odds * 100) / 100 : 0,
+              locked,
+            });
           }
         }
         if (rows.length === 0) continue; // fixture doesn't offer any preferred market
+
+        // Live (unlocked) rows first so actionable prices sit at the top; within
+        // each group keep the market grouping stable.
+        rows.sort((a, b) => Number(a.locked) - Number(b.locked));
 
         out.push({
           eventId: ev.eventId,
