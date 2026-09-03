@@ -364,18 +364,25 @@ function SummaryTab({ enrichment, selection, intelligence }: { enrichment: Enric
     };
   })();
 
+  // "Played" per live enrichment requires REAL data. An empty enrichment shell
+  // has possession [0,0] (a truthy array) and ftScore [0,0], so we must check
+  // for actual goals / non-zero possession — not just that the arrays exist —
+  // or Summary would show a bogus 0-0 and never consult the DB result.
+  const enrichPoss = enrichment?.stats.possession;
   const enrichmentPlayed = !!enrichment && (
     enrichment.goals.length > 0 ||
-    !!enrichment.stats.possession ||
+    (!!enrichPoss && (enrichPoss[0] + enrichPoss[1]) > 0) ||
     enrichment.ftScore[0] > 0 || enrichment.ftScore[1] > 0
   );
   const played = !!selection.score || enrichmentPlayed || !!dbScore;
 
-  // Resolve the score to display, in priority: live enrichment → paste score → DB
+  // Resolve the score to display, in priority: live enrichment → DB result →
+  // paste score. DB result is preferred over the paste score because the paste
+  // score is often absent/0 for future fixtures while the DB holds the real FT.
   const displayScore: [number, number] | null =
     enrichmentPlayed && enrichment ? [enrichment.ftScore[0], enrichment.ftScore[1]]
-    : selection.score ? [selection.score.home, selection.score.away]
     : dbScore ? [dbScore.home, dbScore.away]
+    : selection.score ? [selection.score.home, selection.score.away]
     : null;
 
   // Team-vs-team form header + pick-specific market read (from DB form)
