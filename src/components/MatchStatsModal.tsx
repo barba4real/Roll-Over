@@ -714,6 +714,24 @@ function MomentumBadge({ trend, recentPpg, priorPpg }: { trend: MomentumTrend; r
  * (6/12/All), like a standard livescore layout. Pulls the full match list for
  * the team from the DB so switching venue reveals every home / away game.
  */
+// Persisted toggle prefs. Count is a global display preference; venue is keyed
+// per panel role (home/away) so each panel remembers its own last choice while
+// still falling back to the sensible role default (home team → Home form).
+const COUNT_PREF_KEY = 'rollover_form_count';
+const venuePrefKey = (role: Venue) => `rollover_form_venue_${role}`;
+
+function readCountPref(): Count {
+  const v = localStorage.getItem(COUNT_PREF_KEY);
+  if (v === '12') return 12;
+  if (v === '0') return 0;
+  return 6;
+}
+function readVenuePref(role: Venue): Venue {
+  const v = localStorage.getItem(venuePrefKey(role));
+  if (v === 'all' || v === 'home' || v === 'away') return v;
+  return role; // fall back to the panel's role default
+}
+
 function TeamFormPanel({
   teamName,
   defaultVenue,
@@ -721,8 +739,12 @@ function TeamFormPanel({
   teamName: string;
   defaultVenue: Venue;
 }) {
-  const [venue, setVenue] = useState<Venue>(defaultVenue);
-  const [count, setCount] = useState<Count>(6);
+  const [venue, setVenueState] = useState<Venue>(() => readVenuePref(defaultVenue));
+  const [count, setCountState] = useState<Count>(() => readCountPref());
+
+  // Wrap setters to persist the choice.
+  const setVenue = (v: Venue) => { setVenueState(v); localStorage.setItem(venuePrefKey(defaultVenue), v); };
+  const setCount = (c: Count) => { setCountState(c); localStorage.setItem(COUNT_PREF_KEY, String(c)); };
 
   // All matches for this team (most recent first), unfiltered by venue.
   const allTeamMatches = React.useMemo(
@@ -916,37 +938,79 @@ function FormTab({ intelligence, selection }: { intelligence: MatchIntelligence 
       <TeamFormPanel teamName={selection.homeTeam} defaultVenue="home" />
       <TeamFormPanel teamName={selection.awayTeam} defaultVenue="away" />
 
-      {/* Head to Head — true fixture perspective */}
+      {/* Head to Head — with venue split (all meetings vs home-team-at-home) */}
       {intelligence.h2h.length > 0 && (
-        <div className="mb-4">
-          <h4 className="text-xs font-bold text-gray-200 mb-2">Head to Head</h4>
-          <div className="space-y-0.5">
-            {intelligence.h2h.map((m, i) => (
-              <div key={i} className="flex items-center gap-2 text-[11px] py-0.5 border-b border-gray-800">
-                <span className={`w-4 h-4 flex items-center justify-center rounded text-[10px] font-bold ${
-                  m.result === 'W' ? 'bg-green-800 text-green-300' :
-                  m.result === 'D' ? 'bg-yellow-800 text-yellow-300' :
-                  'bg-red-800 text-red-300'
-                }`}>{m.result}</span>
-                <span className="text-gray-500 w-20 shrink-0">{m.date}</span>
-                <span className="text-gray-300 flex-1">
-                  {m.isHome ? (
-                    <>
-                      <span className="font-medium text-gray-200">{selection.homeTeam.split(' ')[0]}</span>{' '}
-                      <span className="text-white font-bold">{m.goalsFor}-{m.goalsAgainst}</span>{' '}
-                      {m.opponent.split(' ')[0]}
-                    </>
-                  ) : (
-                    <>
-                      {m.opponent.split(' ')[0]}{' '}
-                      <span className="text-white font-bold">{m.goalsAgainst}-{m.goalsFor}</span>{' '}
-                      <span className="font-medium text-gray-200">{selection.homeTeam.split(' ')[0]}</span>
-                    </>
-                  )}
-                </span>
-              </div>
-            ))}
-          </div>
+        <H2HSection h2h={intelligence.h2h} homeTeam={selection.homeTeam} awayTeam={selection.awayTeam} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Head-to-head section with a venue split: "All meetings" vs just the ones
+ * played at the current home team's ground. FormMatch.isHome here means the
+ * fixture's home team (the selection's home side) hosted that meeting.
+ */
+function H2HSection({ h2h, homeTeam, awayTeam }: { h2h: import('../engine/intelligence-hints').FormMatch[]; homeTeam: string; awayTeam: string }) {
+  const [venue, setVenue] = useState<'all' | 'home'>('all');
+  const homeFirst = homeTeam.split(' ')[0];
+  const awayFirst = awayTeam.split(' ')[0];
+
+  const rows = venue === 'home' ? h2h.filter(m => m.isHome) : h2h;
+  const w = rows.filter(m => m.result === 'W').length; // home team wins
+  const d = rows.filter(m => m.result === 'D').length;
+  const l = rows.filter(m => m.result === 'L').length;
+
+  const tab = (v: 'all' | 'home', label: string) => (
+    <button
+      onClick={() => setVenue(v)}
+      className={`px-2 py-0.5 text-[10px] font-medium rounded transition-colors ${
+        venue === v ? 'bg-purple-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-gray-200'
+      }`}
+    >{label}</button>
+  );
+
+  return (
+    <div className="mb-4">
+      <div className="flex items-center justify-between mb-2">
+        <h4 className="text-xs font-bold text-gray-200">Head to Head</h4>
+        <div className="flex items-center gap-1">
+          {tab('all', 'All meetings')}
+          {tab('home', `${homeFirst} at home`)}
+        </div>
+      </div>
+      <div className="text-[10px] text-gray-500 mb-1.5">
+        From {homeFirst}'s view: {w}W {d}D {l}L <span className="text-gray-600">({awayFirst} won {l})</span>
+      </div>
+      {rows.length === 0 ? (
+        <p className="text-[11px] text-gray-600">No {venue === 'home' ? `meetings at ${homeFirst}'s ground` : 'meetings'} in database.</p>
+      ) : (
+        <div className="space-y-0.5">
+          {rows.map((m, i) => (
+            <div key={i} className="flex items-center gap-2 text-[11px] py-0.5 border-b border-gray-800">
+              <span className={`w-4 h-4 flex items-center justify-center rounded text-[10px] font-bold ${
+                m.result === 'W' ? 'bg-green-800 text-green-300' :
+                m.result === 'D' ? 'bg-yellow-800 text-yellow-300' :
+                'bg-red-800 text-red-300'
+              }`}>{m.result}</span>
+              <span className="text-gray-500 w-20 shrink-0">{m.date}</span>
+              <span className="text-gray-300 flex-1">
+                {m.isHome ? (
+                  <>
+                    <span className="font-medium text-gray-200">{homeFirst}</span>{' '}
+                    <span className="text-white font-bold">{m.goalsFor}-{m.goalsAgainst}</span>{' '}
+                    {m.opponent.split(' ')[0]}
+                  </>
+                ) : (
+                  <>
+                    {m.opponent.split(' ')[0]}{' '}
+                    <span className="text-white font-bold">{m.goalsAgainst}-{m.goalsFor}</span>{' '}
+                    <span className="font-medium text-gray-200">{homeFirst}</span>
+                  </>
+                )}
+              </span>
+            </div>
+          ))}
         </div>
       )}
     </div>

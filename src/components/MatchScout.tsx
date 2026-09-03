@@ -1107,15 +1107,27 @@ export default function MatchScout({ onAddPick }: Props) {
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
-                  {match.suggestions[0] && (
-                    <span className={`text-xs px-2 py-0.5 rounded font-medium ${
-                      match.suggestions[0].confidence >= 75 ? 'bg-green-900 text-green-300' :
-                      match.suggestions[0].confidence >= 65 ? 'bg-yellow-900 text-yellow-300' :
-                      'bg-gray-700 text-gray-400'
-                    }`}>
-                      {match.suggestions[0].pick} ({match.suggestions[0].confidence}%)
-                    </span>
-                  )}
+                  {match.suggestions[0] && (() => {
+                    const best = match.suggestions[0];
+                    // Data-backed = has real reasoning, not the no-data fallback
+                    const noData = best.reasoning.some(r => r.toLowerCase().includes('no historical data'));
+                    const limited = best.reasoning.some(r => r.toLowerCase().includes('limited data'));
+                    const tier = best.confidence >= 75 ? { label: 'Strong', cls: 'bg-green-900 text-green-300' }
+                      : best.confidence >= 65 ? { label: 'Fair', cls: 'bg-yellow-900 text-yellow-300' }
+                      : { label: 'Thin', cls: 'bg-gray-700 text-gray-400' };
+                    return (
+                      <span className="flex items-center gap-1">
+                        {/* Data-backing dot: green=solid, amber=limited, red=none */}
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full ${noData ? 'bg-red-500' : limited ? 'bg-amber-500' : 'bg-green-500'}`}
+                          title={noData ? 'No historical data — low trust' : limited ? 'Limited data' : 'Backed by historical data'}
+                        />
+                        <span className={`text-xs px-2 py-0.5 rounded font-medium ${tier.cls}`}>
+                          {best.pick} ({best.confidence}%) · {tier.label}
+                        </span>
+                      </span>
+                    );
+                  })()}
                   <span className="text-gray-500 text-xs">{expandedMatch === match.fixtureId ? '▲' : '▼'}</span>
                 </div>
               </div>
