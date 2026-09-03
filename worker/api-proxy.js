@@ -49,6 +49,9 @@ const ALLOWED_DOMAINS = [
   '11v11.com',
   'www.soccerpunter.com',
   'soccerpunter.com',
+  // SportyBet — direct fixtures + odds JSON API (all region paths /ng, /gh, etc.)
+  'www.sportybet.com',
+  'sportybet.com',
 ];
 
 export default {

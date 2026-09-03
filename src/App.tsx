@@ -61,6 +61,8 @@ export default function App() {
   });
   const [showAccuracy, setShowAccuracy] = useState(false);
   const [analyzeFixture, setAnalyzeFixture] = useState<{ home: string; away: string; league: string } | null>(null);
+  const [sbImporting, setSbImporting] = useState(false);
+  const [sbMsg, setSbMsg] = useState<string | null>(null);
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     const saved = localStorage.getItem('rollover_theme');
     return (saved === 'light') ? 'light' : 'dark';
@@ -674,6 +676,47 @@ export default function App() {
     }
   }
 
+  // Import fixtures + odds directly from SportyBet's API (the book the user
+  // stakes on). Non-destructive: merges into the existing pool, deduped by
+  // team-pair + market + pick, and drops already-started fixtures — same rules
+  // as the paste workflow, so the two coexist.
+  async function handleSportyBetImport() {
+    setSbImporting(true);
+    setSbMsg('Connecting to SportyBet...');
+    try {
+      const { fetchSportyBetSelections } = await import('./engine/sportybet');
+      const imported = await fetchSportyBetSelections({
+        region: 'ng',
+        maxPages: 6,
+        pageSize: 20,
+        onProgress: (m) => setSbMsg(m),
+      });
+      const now = Date.now();
+      const GRACE_MS = 5 * 60 * 1000;
+      const future = imported.filter(s => {
+        const k = s.kickOffDateTime ? new Date(s.kickOffDateTime).getTime() : NaN;
+        return isNaN(k) || k > now - GRACE_MS;
+      });
+      if (future.length === 0) {
+        setSbMsg('No upcoming SportyBet fixtures found. If this persists, redeploy the Cloudflare Worker (sportybet.com must be whitelisted).');
+      } else {
+        setSelections(prev => {
+          const keyOf = (s: typeof future[number]) => `${s.homeTeam.toLowerCase()}|${s.awayTeam.toLowerCase()}|${s.market.toLowerCase()}|${s.pick.toLowerCase()}`;
+          const existing = new Set(prev.map(keyOf));
+          const fresh = future.filter(s => !existing.has(keyOf(s)));
+          return [...prev, ...fresh];
+        });
+        setSbMsg(`Imported ${future.length} SportyBet selections.`);
+        setView('paste');
+      }
+    } catch (e: any) {
+      setSbMsg(`SportyBet import failed: ${e?.message || 'unknown error'}`);
+    } finally {
+      setSbImporting(false);
+      setTimeout(() => setSbMsg(null), 7000);
+    }
+  }
+
   // Suggest best slip at a target odds level using confidence scores
   function handleSuggestSlip(targetOdds: number) {
     const slip = suggestBestSlip(selections, scoreMap, targetOdds);
@@ -825,6 +868,14 @@ export default function App() {
                   Quick Paste from Clipboard
                 </button>
                 <button
+                  onClick={handleSportyBetImport}
+                  disabled={sbImporting}
+                  className="px-3 py-2 bg-green-700 hover:bg-green-600 disabled:bg-gray-600 rounded text-xs font-medium text-white flex items-center gap-1"
+                  title="Pull upcoming fixtures + odds straight from SportyBet — the book you stake on"
+                >
+                  {sbImporting ? 'Importing…' : '⬇ Import from SportyBet'}
+                </button>
+                <button
                   onClick={() => setView('paste')}
                   className="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-xs font-medium text-gray-300"
                 >
@@ -851,6 +902,11 @@ export default function App() {
                   </button>
                 )}
               </div>
+
+              {/* SportyBet import status */}
+              {sbMsg && (
+                <div className="mb-4 p-2 bg-green-900/25 border border-green-800 rounded text-[11px] text-green-200">{sbMsg}</div>
+              )}
 
               {/* Selections Summary */}
               {selections.length > 0 && (
