@@ -307,56 +307,90 @@ function buildMarketRead(
   return { text: `${hf} at home: ${H.wins}W-${H.draws}D-${H.losses}L, avg ${H.avgScored} scored. ${af} away: ${A.wins}W-${A.draws}D-${A.losses}L, avg ${A.avgScored} scored.`, supportive: true };
 }
 
+/**
+ * Live countdown to kickoff for an upcoming fixture. Ticks every second and
+ * shows days/hours/minutes/seconds remaining — never a score.
+ */
+function KickoffCountdown({ kickoffMs }: { kickoffMs: number }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const remaining = Math.max(0, kickoffMs - now);
+  const totalSec = Math.floor(remaining / 1000);
+  const days = Math.floor(totalSec / 86400);
+  const hours = Math.floor((totalSec % 86400) / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const secs = totalSec % 60;
+
+  const kickoffLabel = new Date(kickoffMs).toLocaleString(undefined, {
+    weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+  });
+
+  const Cell = ({ v, label }: { v: number; label: string }) => (
+    <div className="flex flex-col items-center">
+      <span className="text-xl font-bold text-white tabular-nums">{String(v).padStart(2, '0')}</span>
+      <span className="text-[8px] text-gray-500 uppercase">{label}</span>
+    </div>
+  );
+
+  return (
+    <div className="text-center py-3 bg-gray-800 rounded-lg border border-blue-900/50">
+      <div className="text-[10px] font-bold uppercase tracking-wide text-blue-400 mb-2">Kicks off in</div>
+      <div className="flex items-center justify-center gap-3">
+        {days > 0 && <><Cell v={days} label="days" /><span className="text-gray-600 text-lg">:</span></>}
+        <Cell v={hours} label="hrs" />
+        <span className="text-gray-600 text-lg">:</span>
+        <Cell v={mins} label="min" />
+        <span className="text-gray-600 text-lg">:</span>
+        <Cell v={secs} label="sec" />
+      </div>
+      <div className="text-[10px] text-gray-500 mt-2">{kickoffLabel}</div>
+    </div>
+  );
+}
+
 function SummaryTab({ enrichment, selection, intelligence }: { enrichment: EnrichedMatchData | null; selection: ParsedSelection; intelligence: MatchIntelligence | null }) {
   // Look up this exact fixture's final score from the local results DB. The
   // crawl/sync stores results there, so a played match has a score even when
   // live enrichment (possession/xG) isn't available.
-  const dbScore = (() => {
-    const all = getAllMatches();
-    // All DB rows for this exact team pair (either orientation).
-    const pair = all.filter(m =>
-      (isSameTeam(m.homeTeam, selection.homeTeam) && isSameTeam(m.awayTeam, selection.awayTeam)) ||
-      (isSameTeam(m.homeTeam, selection.awayTeam) && isSameTeam(m.awayTeam, selection.homeTeam))
-    );
-    if (pair.length === 0) return null;
+  // Has THIS fixture kicked off yet? (based on the pasted kickoff time)
+  const kickoffMs = selection.kickOffDateTime ? new Date(selection.kickOffDateTime).getTime() : NaN;
+  const hasKickedOff = !isNaN(kickoffMs) && kickoffMs <= Date.now();
 
-    // Parse a row's date to a day-key (YYYY-MM-DD) and a timestamp.
+  // Resolve THIS fixture's result from the DB — and ONLY this fixture. We match
+  // on the same calendar day as the pasted kickoff so a PAST head-to-head
+  // meeting (which lives in the H2H tab) is never shown as this match's score.
+  const dbScore = (() => {
+    // If the match hasn't kicked off, there is no result to show — full stop.
+    if (!hasKickedOff) return null;
+
+    const all = getAllMatches();
     const dayKey = (d: string): string => {
       if (!d) return '';
       if (d.includes('/')) { const [dd, mm, yy] = d.split('/'); return `${yy.length === 2 ? '20' + yy : yy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}`; }
       return d.slice(0, 10);
     };
-    const ts = (d: string): number => {
-      const k = dayKey(d);
-      const t = k ? new Date(k).getTime() : 0;
-      return isNaN(t) ? 0 : t;
-    };
-
-    // 1) Prefer the row on the SAME calendar day as the analyzed fixture — that
-    //    is unambiguously "this meeting". Among those, prefer a scored row over
-    //    a 0-0 scheduled placeholder.
     const fixtureDay = selection.kickOffDateTime
       ? `${selection.kickOffDateTime.getFullYear()}-${String(selection.kickOffDateTime.getMonth() + 1).padStart(2, '0')}-${String(selection.kickOffDateTime.getDate()).padStart(2, '0')}`
       : '';
-    const sameDay = fixtureDay ? pair.filter(m => dayKey(m.date) === fixtureDay) : [];
-    const scoredSameDay = sameDay.filter(m => (m.ftHomeGoals + m.ftAwayGoals) > 0);
+    if (!fixtureDay) return null;
 
-    // 2) Otherwise, the most recent SCORED meeting; then any scored; then newest.
-    const scored = pair.filter(m => (m.ftHomeGoals + m.ftAwayGoals) > 0)
-      .sort((a, b) => ts(b.date) - ts(a.date));
+    // Rows for this exact pair (either orientation) ON the fixture's own day.
+    const sameDay = all.filter(m =>
+      dayKey(m.date) === fixtureDay && (
+        (isSameTeam(m.homeTeam, selection.homeTeam) && isSameTeam(m.awayTeam, selection.awayTeam)) ||
+        (isSameTeam(m.homeTeam, selection.awayTeam) && isSameTeam(m.awayTeam, selection.homeTeam))
+      )
+    );
+    if (sameDay.length === 0) return null;
 
-    // If the fixture day is still in the future and the only same-day row is a
-    // goalless placeholder, treat the score as not-yet-available (no bogus 0-0).
-    const fixtureInFuture = !!fixtureDay && new Date(fixtureDay).getTime() > Date.now();
-
-    const hit =
-      scoredSameDay[0] ||                                  // this fixture, played
-      scored[0] ||                                         // most recent scored meeting anywhere
-      (!fixtureInFuture ? sameDay[0] : undefined) ||       // this fixture, genuine 0-0 (only if not future)
-      null;
+    // Prefer a scored row; a 0-0 row is only meaningful if the match is over.
+    const hit = sameDay.find(m => (m.ftHomeGoals + m.ftAwayGoals) > 0) || sameDay[0];
     if (!hit) return null;
 
-    // Orient the score so [home, away] matches the selection's home/away
     const homeIsFirst = isSameTeam(hit.homeTeam, selection.homeTeam);
     return {
       home: homeIsFirst ? hit.ftHomeGoals : hit.ftAwayGoals,
@@ -374,13 +408,15 @@ function SummaryTab({ enrichment, selection, intelligence }: { enrichment: Enric
     (!!enrichPoss && (enrichPoss[0] + enrichPoss[1]) > 0) ||
     enrichment.ftScore[0] > 0 || enrichment.ftScore[1] > 0
   );
-  const played = !!selection.score || enrichmentPlayed || !!dbScore;
+  // A score is only meaningful once the match has kicked off. Before kickoff we
+  // never show a score line (and never a stale past-meeting score).
+  const played = hasKickedOff && (!!selection.score || enrichmentPlayed || !!dbScore);
 
   // Resolve the score to display, in priority: live enrichment → DB result →
   // paste score. DB result is preferred over the paste score because the paste
   // score is often absent/0 for future fixtures while the DB holds the real FT.
-  const displayScore: [number, number] | null =
-    enrichmentPlayed && enrichment ? [enrichment.ftScore[0], enrichment.ftScore[1]]
+  const displayScore: [number, number] | null = !hasKickedOff ? null
+    : enrichmentPlayed && enrichment ? [enrichment.ftScore[0], enrichment.ftScore[1]]
     : dbScore ? [dbScore.home, dbScore.away]
     : selection.score ? [selection.score.home, selection.score.away]
     : null;
@@ -432,8 +468,11 @@ function SummaryTab({ enrichment, selection, intelligence }: { enrichment: Enric
         </div>
       )}
 
-      {/* Score — shown for a played match; otherwise a clear notice */}
-      {played && displayScore ? (
+      {/* Score block — three states: upcoming (countdown), played (score),
+          or played-but-not-found. A pre-kickoff match NEVER shows a score. */}
+      {!hasKickedOff ? (
+        <KickoffCountdown kickoffMs={kickoffMs} />
+      ) : played && displayScore ? (
         <div className="text-center py-3 bg-gray-800 rounded-lg">
           <div className="text-2xl font-bold text-white">
             {displayScore[0]} - {displayScore[1]}
@@ -449,8 +488,8 @@ function SummaryTab({ enrichment, selection, intelligence }: { enrichment: Enric
         </div>
       ) : (
         <div className="text-center py-3 bg-gray-800 rounded-lg border border-gray-700">
-          <div className="text-sm text-gray-400">Score unavailable</div>
-          <div className="text-[11px] text-gray-600 mt-1">Not found in results database yet. Try "Sync sources", or see Form & Intel below.</div>
+          <div className="text-sm text-gray-400">Result not in database yet</div>
+          <div className="text-[11px] text-gray-600 mt-1">This match has kicked off but its result isn't stored. Try "Sync sources", or see Form &amp; Intel below.</div>
         </div>
       )}
 
