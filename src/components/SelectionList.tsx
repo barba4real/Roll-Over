@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { ParsedSelection } from '../engine/types';
 import { interpretMarket, getMarketCategory } from '../engine/market-interpreter';
 import { ScoringResult } from '../engine/scoring';
@@ -12,7 +12,7 @@ interface Props {
   scores?: Map<string, ScoringResult>;
   onUpdateOdds?: (selectionId: string, newOdds: number) => void;
   onRemoveSelection?: (selectionId: string) => void;
-  onUseFiltered?: (filtered: ParsedSelection[]) => void;
+  onUseFiltered?: (filtered: ParsedSelection[] | null) => void;
   onExportSelections?: () => void;
   onImportSelections?: (file: File) => void;
   onClearSelections?: () => void;
@@ -185,6 +185,18 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
       default: return 0;
     }
   });
+
+  // Continuously feed the current filtered+sorted view to the slip generator, so
+  // "what you see is what you generate". When no narrowing filter is active we
+  // report null (generator uses the full pool). Keyed on the filter/sort INPUTS
+  // (not the `filtered` array reference) to avoid an update loop.
+  const anyFilterActive = pickFilter !== 'all' || marketFilter !== 'all' ||
+    dateFilter !== 'all' || !!dateFrom || !!dateTo || !!oddsMin || !!oddsMax || futureOnly;
+  useEffect(() => {
+    if (!onUseFiltered) return;
+    onUseFiltered(anyFilterActive ? filtered : null as any);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickFilter, marketFilter, dateFilter, dateFrom, dateTo, oddsMin, oddsMax, futureOnly, sortBy, selections]);
 
   // Detect matches with multiple picks
   const matchPickCounts = useMemo(() => {

@@ -1304,14 +1304,10 @@ export default function App() {
               {selections.length > 0 && (
                 <>
                   {builderPool && (
-                    <div className="mb-2 p-2 bg-blue-900/30 border border-blue-800 rounded text-xs text-blue-300 flex items-center justify-between">
-                      <span>Builder scoped to {builderPool.length} selected picks (of {selections.length})</span>
-                      <button
-                        onClick={() => setBuilderPool(null)}
-                        className="px-2 py-0.5 bg-gray-700 hover:bg-gray-600 rounded text-gray-300"
-                      >
-                        Use all
-                      </button>
+                    <div className="mb-2 p-2 bg-blue-900/30 border border-blue-800 rounded text-xs text-blue-300">
+                      Generating from your <span className="font-semibold">{builderPool.length}</span> filtered
+                      pick(s) (of {selections.length}) — slips will only use these. Clear the list
+                      filters above to generate from the whole pool.
                     </div>
                   )}
                   <SlipGenerator
