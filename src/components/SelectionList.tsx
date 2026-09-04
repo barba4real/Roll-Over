@@ -28,7 +28,7 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
   const [oddsMin, setOddsMin] = useState<string>('');
   const [oddsMax, setOddsMax] = useState<string>('');
   const [futureOnly, setFutureOnly] = useState<boolean>(false);
-  const [sortBy, setSortBy] = useState<'kickoff' | 'odds_asc' | 'odds_desc' | 'team' | 'score_desc'>('kickoff');
+  const [sortBy, setSortBy] = useState<'kickoff' | 'kickoff_desc' | 'odds_asc' | 'odds_desc' | 'team' | 'score_desc'>('kickoff');
   const [statsModal, setStatsModal] = useState<ParsedSelection | null>(null);
   const [intelCache, setIntelCache] = useState<Map<string, MatchIntelligence>>(new Map());
   const [analyzingAll, setAnalyzingAll] = useState(false);
@@ -178,6 +178,7 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
   }).sort((a, b) => {
     switch (sortBy) {
       case 'kickoff': return new Date(a.kickOffDateTime).getTime() - new Date(b.kickOffDateTime).getTime();
+      case 'kickoff_desc': return new Date(b.kickOffDateTime).getTime() - new Date(a.kickOffDateTime).getTime();
       case 'odds_asc': return a.odds - b.odds;
       case 'odds_desc': return b.odds - a.odds;
       case 'team': return a.homeTeam.localeCompare(b.homeTeam);
@@ -433,7 +434,8 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
             onChange={(e) => setSortBy(e.target.value as any)}
             className="px-2 py-0.5 bg-gray-800 border border-gray-600 rounded text-xs text-gray-300 focus:outline-none focus:border-blue-500"
           >
-            <option value="kickoff">Kick-off time</option>
+            <option value="kickoff">Kick-off (earliest first)</option>
+            <option value="kickoff_desc">Kick-off (latest first)</option>
             <option value="odds_asc">Odds (low to high)</option>
             <option value="odds_desc">Odds (high to low)</option>
             <option value="score_desc">Confidence (high to low)</option>
