@@ -39,8 +39,9 @@ export default function PreferredMarkets({ onImport }: Props) {
   const win = store.window;
 
   const [leagueFilter, setLeagueFilter] = useState<string>('');
-  const [maxPages, setMaxPages] = useState(10);
   const [onlyPreferred, setOnlyPreferred] = useState(true);
+  // Collapsed league groups (by league name). Default: all expanded.
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   // Modal state (per-fixture preferred markets)
   const [openFixture, setOpenFixture] = useState<SbFixture | null>(null);
@@ -49,13 +50,27 @@ export default function PreferredMarkets({ onImport }: Props) {
   const [imported, setImported] = useState<Set<string>>(new Set());
 
   function handleScan() {
-    // Force a fresh pull into the shared store (updates Scout too).
-    void pullFixtures({ window: win, maxPages, force: true });
+    // Force a fresh, FULL pull into the shared store (updates Scout too). No
+    // page cap — the store exhausts the SportyBet feed so no showcased league
+    // is left out.
+    void pullFixtures({ window: win, force: true });
   }
 
   function setWin(w: TimeWindow) {
     // Changing the window triggers a shared re-pull for that window.
-    void pullFixtures({ window: w, maxPages });
+    void pullFixtures({ window: w });
+  }
+
+  function toggleCollapse(league: string) {
+    setCollapsed(prev => {
+      const next = new Set(prev);
+      if (next.has(league)) next.delete(league); else next.add(league);
+      return next;
+    });
+  }
+  const allCollapsed = (leaguesShown: string[]) => leaguesShown.every(l => collapsed.has(l));
+  function toggleAll(leaguesShown: string[]) {
+    setCollapsed(allCollapsed(leaguesShown) ? new Set() : new Set(leaguesShown));
   }
 
   const shown = useMemo(() => {
@@ -121,6 +136,11 @@ export default function PreferredMarkets({ onImport }: Props) {
           <p className="text-[11px] text-gray-500">The fixtures SportyBet showcases (the book you play). Click a fixture to see your preferred markets — fouls locked lines shown for pre-staging.</p>
         </div>
         <div className="flex items-center gap-2">
+          {!loading && fixtures.length > 0 && (
+            <span className="text-[11px] text-gray-300">
+              <span className="font-semibold text-green-400">{fixtures.length}</span> fixtures · {leagues.length} leagues
+            </span>
+          )}
           {store.pulledAt && (
             <span className="text-[10px] text-gray-600">
               {(() => { const m = Math.round((Date.now() - store.pulledAt) / 60000); return m < 60 ? `pulled ${m}m ago` : `pulled ${Math.round(m / 60)}h ago`; })()}
@@ -165,54 +185,68 @@ export default function PreferredMarkets({ onImport }: Props) {
           <input type="checkbox" checked={onlyPreferred} onChange={(e) => setOnlyPreferred(e.target.checked)} />
           Only fixtures with my markets
         </label>
-        <label className="flex items-center gap-1 text-[11px] text-gray-400">
-          Depth:
-          <select
-            value={maxPages}
-            onChange={(e) => setMaxPages(parseInt(e.target.value))}
-            className="px-1.5 py-1 bg-gray-800 border border-gray-600 rounded text-xs text-gray-300"
+        {grouped.length > 0 && (
+          <button
+            onClick={() => toggleAll(grouped.map(([l]) => l))}
+            className="ml-auto text-[10px] px-2 py-1 rounded bg-gray-800 border border-gray-600 text-gray-300 hover:bg-gray-700"
           >
-            <option value={5}>5 pages</option>
-            <option value={10}>10 pages</option>
-            <option value={20}>20 pages</option>
-            <option value={40}>40 pages</option>
-          </select>
-        </label>
+            {allCollapsed(grouped.map(([l]) => l)) ? 'Expand all' : 'Collapse all'}
+          </button>
+        )}
       </div>
 
       {status && (
         <div className="mb-3 p-2 bg-gray-800 border border-gray-700 rounded text-[11px] text-gray-300">{status}</div>
       )}
 
-      {/* Fixture list — one row per fixture, grouped by league */}
-      <div className="space-y-3">
-        {grouped.map(([league, fxs]) => (
-          <div key={league}>
-            <div className="text-[11px] font-semibold text-gray-400 mb-1 flex items-center gap-2">
-              <span className="px-1.5 py-0.5 rounded bg-gray-800">🏆 {league}</span>
-              <span className="text-gray-600">{fxs.length}</span>
+      {/* Showing summary (respects the current filters) */}
+      {!loading && shown.length > 0 && (
+        <div className="mb-2 text-[10px] text-gray-500">
+          Showing {shown.length} fixture(s) across {grouped.length} league(s)
+          {shown.length !== fixtures.length && <span className="text-gray-600"> (filtered from {fixtures.length})</span>}
+        </div>
+      )}
+
+      {/* Fixture list — collapsible groups, one row per fixture */}
+      <div className="space-y-2">
+        {grouped.map(([league, fxs]) => {
+          const isCollapsed = collapsed.has(league);
+          return (
+            <div key={league} className="border border-gray-800 rounded overflow-hidden">
+              <button
+                onClick={() => toggleCollapse(league)}
+                className="w-full flex items-center justify-between px-2 py-1.5 bg-gray-800 hover:bg-gray-750 text-left"
+              >
+                <span className="text-[11px] font-semibold text-gray-300 flex items-center gap-1.5">
+                  <span className="text-gray-500 w-3 inline-block">{isCollapsed ? '▸' : '▾'}</span>
+                  🏆 {league}
+                </span>
+                <span className="text-[10px] text-gray-500">{fxs.length}</span>
+              </button>
+              {!isCollapsed && (
+                <div className="space-y-1 p-1">
+                  {fxs.map(fx => (
+                    <button
+                      key={fx.eventId}
+                      onClick={() => openMarkets(fx)}
+                      className="w-full text-left bg-gray-800 hover:bg-gray-700 rounded border border-gray-700 hover:border-blue-600 p-2.5 transition-colors"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="text-sm text-gray-200">
+                          {fx.homeTeam} <span className="text-gray-500">v</span> {fx.awayTeam}
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="text-[10px] text-gray-500">{fx.date} {fx.time}</span>
+                          {fx.hasPreferred && <span className="text-[9px] px-1.5 py-0.5 rounded bg-green-900 text-green-300">markets ▸</span>}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
-            <div className="space-y-1">
-              {fxs.map(fx => (
-                <button
-                  key={fx.eventId}
-                  onClick={() => openMarkets(fx)}
-                  className="w-full text-left bg-gray-800 hover:bg-gray-700 rounded border border-gray-700 hover:border-blue-600 p-2.5 transition-colors"
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="text-sm text-gray-200">
-                      {fx.homeTeam} <span className="text-gray-500">v</span> {fx.awayTeam}
-                    </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <span className="text-[10px] text-gray-500">{fx.date} {fx.time}</span>
-                      {fx.hasPreferred && <span className="text-[9px] px-1.5 py-0.5 rounded bg-green-900 text-green-300">markets ▸</span>}
-                    </div>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {!loading && fixtures.length === 0 && !status && (

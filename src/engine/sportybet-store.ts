@@ -228,7 +228,10 @@ export async function pullFixtures(opts?: {
     try {
       const res = await fetchSportyBetFixtures({
         region: opts?.region ?? 'ng',
-        maxPages: opts?.maxPages ?? 12,
+        // Default high so we EXHAUST the SportyBet feed — the pager stops on the
+        // first empty page (see fetchSportyBetFixtures), so no showcased league
+        // is dropped by an arbitrary depth cap. Callers may override to go shallow.
+        maxPages: opts?.maxPages ?? 200,
         pageSize: opts?.pageSize ?? 30,
         window: win,
         onProgress: (m) => setState({ progress: m }),

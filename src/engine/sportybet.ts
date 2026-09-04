@@ -458,9 +458,9 @@ export async function fetchSportyBetFixtures(opts?: {
   const byId = new Map<string, SbFixture>();
 
   for (let page = 1; page <= maxPages; page++) {
-    onProgress?.(`Loading SportyBet fixtures — page ${page}/${maxPages}…`);
+    onProgress?.(`Loading SportyBet fixtures — page ${page} (${byId.size} so far)…`);
     const tournaments = await fetchPageFor(region, PREFERRED_IDS_CSV, page, pageSize);
-    if (tournaments.length === 0) break;
+    if (tournaments.length === 0) break; // feed exhausted — no more showcased fixtures
 
     for (const t of tournaments) {
       for (const ev of t.events || []) {
