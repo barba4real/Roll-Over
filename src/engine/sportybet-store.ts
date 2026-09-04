@@ -115,9 +115,10 @@ async function ensureTable() {
     )
   `);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_upcoming_kickoff ON upcoming_fixtures(kickoff_ms)`);
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_upcoming_league_id ON upcoming_fixtures(league_id)`);
   // Backward-compat: add league_id to a pre-existing table (ignore if present).
+  // Must happen BEFORE the league_id index so the index doesn't fail on a missing column.
   try { await db.execute(`ALTER TABLE upcoming_fixtures ADD COLUMN league_id TEXT`); } catch {}
+  try { await db.execute(`CREATE INDEX IF NOT EXISTS idx_upcoming_league_id ON upcoming_fixtures(league_id)`); } catch {}
 }
 
 /** Serialize a SbFixture for JSON storage (Date -> epoch ms). */
