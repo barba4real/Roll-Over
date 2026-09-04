@@ -83,6 +83,7 @@ export function isFixtureDataFresh(): boolean {
 
 async function ensureTable() {
   const db = await getDb();
+  // Single-row snapshot of the last pull (fast whole-list restore for the UI).
   await db.execute(`
     CREATE TABLE IF NOT EXISTS sb_fixture_cache (
       id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -91,6 +92,28 @@ async function ensureTable() {
       pulled_at INTEGER NOT NULL
     )
   `);
+  // Durable, accumulating slate — one row per fixture across all pulls/windows.
+  // This is the stable source the offline Python predictor reads (it does not
+  // get wiped by the next pull the way the single-row snapshot does).
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS upcoming_fixtures (
+      event_id TEXT PRIMARY KEY,
+      game_id TEXT,
+      home_team TEXT NOT NULL,
+      away_team TEXT NOT NULL,
+      country TEXT,
+      league_name TEXT,
+      league TEXT,
+      kickoff_ms INTEGER,
+      date TEXT,
+      time TEXT,
+      has_preferred INTEGER DEFAULT 0,
+      window TEXT,
+      first_seen INTEGER NOT NULL,
+      last_seen INTEGER NOT NULL
+    )
+  `);
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_upcoming_kickoff ON upcoming_fixtures(kickoff_ms)`);
 }
 
 /** Serialize a SbFixture for JSON storage (Date -> epoch ms). */
@@ -107,14 +130,46 @@ async function persist() {
   try {
     await ensureTable();
     const db = await getDb();
+    const now = state.pulledAt ?? Date.now();
+
+    // 1) Single-row snapshot (fast whole-list restore for the UI).
     const payload = JSON.stringify({
       fixtures: state.fixtures.map(serializeFixture),
       leagues: state.leagues,
     });
     await db.execute(
       `INSERT OR REPLACE INTO sb_fixture_cache (id, payload, window, pulled_at) VALUES (1, $1, $2, $3)`,
-      [payload, state.window, state.pulledAt ?? Date.now()]
+      [payload, state.window, now]
     );
+
+    // 2) Durable accumulating slate — upsert one row per fixture. INSERT OR
+    //    IGNORE preserves first_seen; the UPDATE refreshes volatile fields so a
+    //    fixture's kickoff/market flag stays current without losing its history.
+    for (const f of state.fixtures) {
+      const kickoffMs = f.kickoff instanceof Date ? f.kickoff.getTime() : Number(f.kickoff) || null;
+      await db.execute(
+        `INSERT OR IGNORE INTO upcoming_fixtures
+           (event_id, game_id, home_team, away_team, country, league_name, league,
+            kickoff_ms, date, time, has_preferred, window, first_seen, last_seen)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`,
+        [
+          f.eventId, f.gameId, f.homeTeam, f.awayTeam, f.country, f.leagueName, f.league,
+          kickoffMs, f.date, f.time, f.hasPreferred ? 1 : 0, state.window, now,
+        ]
+      );
+      await db.execute(
+        `UPDATE upcoming_fixtures
+           SET kickoff_ms = $2, has_preferred = $3, window = $4, last_seen = $5,
+               date = $6, time = $7, league = $8, league_name = $9
+         WHERE event_id = $1`,
+        [f.eventId, kickoffMs, f.hasPreferred ? 1 : 0, state.window, now, f.date, f.time, f.league, f.leagueName]
+      );
+    }
+
+    // 3) Prune fixtures that kicked off more than 2 days ago — keeps the durable
+    //    slate to genuinely upcoming/recent games without unbounded growth.
+    const cutoff = Date.now() - 2 * 24 * 60 * 60 * 1000;
+    await db.execute(`DELETE FROM upcoming_fixtures WHERE kickoff_ms IS NOT NULL AND kickoff_ms < $1`, [cutoff]);
   } catch {
     // Persistence is best-effort; the in-memory store still works this session.
   }
@@ -202,6 +257,7 @@ export async function clearFixtureStore(): Promise<void> {
   try {
     const db = await getDb();
     await db.execute(`DELETE FROM sb_fixture_cache WHERE id = 1`);
+    await db.execute(`DELETE FROM upcoming_fixtures`);
   } catch {}
 }
 
