@@ -39,9 +39,6 @@ export default function PreferredMarkets({ onImport }: Props) {
   const win = store.window;
 
   const [leagueFilter, setLeagueFilter] = useState<string>('');
-  // Default OFF so the FULL SportyBet catalog (all showcased leagues) shows.
-  // Tick it to narrow to fixtures that carry one of the user's preferred markets.
-  const [onlyPreferred, setOnlyPreferred] = useState(false);
   // Collapsed league groups (by league name). Default: all expanded.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
@@ -75,12 +72,13 @@ export default function PreferredMarkets({ onImport }: Props) {
     setCollapsed(allCollapsed(leaguesShown) ? new Set() : new Set(leaguesShown));
   }
 
+  // Markets = the FULL SportyBet catalog (every showcased league). No preferred-
+  // market gating here — that lives in the dedicated Preferred + Fouls tabs.
   const shown = useMemo(() => {
     let list = fixtures;
-    if (onlyPreferred) list = list.filter(f => f.hasPreferred);
     if (leagueFilter) list = list.filter(f => f.league === leagueFilter);
     return list;
-  }, [fixtures, leagueFilter, onlyPreferred]);
+  }, [fixtures, leagueFilter]);
 
   // Group shown fixtures by league for a tidy list
   const grouped = useMemo(() => {
@@ -183,10 +181,6 @@ export default function PreferredMarkets({ onImport }: Props) {
           <option value="">All leagues ({leagues.length})</option>
           {leagues.map(l => <option key={l} value={l}>{l}</option>)}
         </select>
-        <label className="flex items-center gap-1 text-[11px] text-gray-400">
-          <input type="checkbox" checked={onlyPreferred} onChange={(e) => setOnlyPreferred(e.target.checked)} />
-          Only fixtures with my markets
-        </label>
         {grouped.length > 0 && (
           <button
             onClick={() => toggleAll(grouped.map(([l]) => l))}

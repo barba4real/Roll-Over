@@ -575,13 +575,22 @@ export async function fetchFixtureMarkets(
   };
 }
 
-// ─── Fouls-only confirmation (for the dedicated Fouls tab) ───────────────────
+// ─── Per-event preferred-market confirmation (Fouls + Preferred tabs) ────────
 
 // The three fouls market ids we watch (home / away / match-total).
 export const FOULS_MARKET_IDS = ['900544', '900545', '900342'];
 
-export interface FoulsFixture {
+// Convenience key groups for the dedicated tabs.
+export const FOULS_KEYS: PreferredMarketKey[] = ['home_fouls', 'away_fouls'];
+export const NON_FOULS_PREFERRED_KEYS: PreferredMarketKey[] = ['1x2_1up', 'dc_1up', 'win_either_half'];
+
+/**
+ * A fixture confirmed (via the per-event endpoint) to carry a chosen subset of
+ * preferred markets, with the live market rows for those keys.
+ */
+export interface ConfirmedFixture {
   eventId: string;
+  gameId: string;
   homeTeam: string;
   awayTeam: string;
   league: string;                  // "Country: League"
@@ -589,29 +598,37 @@ export interface FoulsFixture {
   kickoff: Date;
   date: string;
   time: string;
-  fouls: PreferredMarketRow[];     // only fouls rows (home/away/match O/U lines)
-  anyOpen: boolean;                // at least one fouls outcome is live + priced
+  markets: PreferredMarketRow[];   // only rows whose key is in the requested set
+  anyOpen: boolean;                // at least one requested outcome is live + priced
 }
 
+// Back-compat alias used by the Fouls tab (its rows are fouls rows).
+export type FoulsFixture = ConfirmedFixture & { fouls: PreferredMarketRow[] };
+
 /**
- * Confirm which SportyBet fixtures actually OFFER fouls markets, and return
- * their live fouls lines/odds. This hits the per-event endpoint for each
- * candidate (fast — ~sub-second per event), so it is CAPPED and kickoff-sorted.
+ * Confirm which SportyBet fixtures actually OFFER the given preferred-market
+ * keys, and return their live lines/odds for those keys. Hits the per-event
+ * endpoint for each candidate (fast — ~sub-second per event), so it is CAPPED
+ * and kickoff-sorted.
  *
- * Used only by the dedicated Fouls tab. It is intentionally separate from the
- * shared Scout/Markets store: the Fouls tab is a focused watchlist of games we
- * can actually play fouls on.
+ * Powers both dedicated tabs: Fouls passes FOULS_KEYS; Preferred passes
+ * NON_FOULS_PREFERRED_KEYS. Intentionally separate from the shared Scout/Markets
+ * store — these are focused, per-event-confirmed watchlists.
  */
-export async function confirmFoulsFixtures(opts?: {
-  region?: SportyRegion;
-  window?: TimeWindow;
-  maxPages?: number;
-  pageSize?: number;
-  cap?: number;                    // max fixtures to per-event confirm (default 40)
-  onProgress?: (msg: string) => void;
-}): Promise<FoulsFixture[]> {
+export async function confirmPreferredFixtures(
+  marketKeys: PreferredMarketKey[],
+  opts?: {
+    region?: SportyRegion;
+    window?: TimeWindow;
+    maxPages?: number;
+    pageSize?: number;
+    cap?: number;                  // max fixtures to per-event confirm (default 40)
+    onProgress?: (msg: string) => void;
+  },
+): Promise<ConfirmedFixture[]> {
   const region = opts?.region ?? 'ng';
   const cap = opts?.cap ?? 40;
+  const keySet = new Set<PreferredMarketKey>(marketKeys);
   opts?.onProgress?.('Loading SportyBet fixtures…');
 
   const { fixtures } = await fetchSportyBetFixtures({
@@ -622,31 +639,31 @@ export async function confirmFoulsFixtures(opts?: {
     onProgress: opts?.onProgress,
   });
 
-  // Candidates first: prefer fixtures the list already flags as carrying a
-  // preferred market, then fall back to all — sorted by soonest kickoff so the
-  // capped set is the most relevant.
+  // Candidates: fixtures the list already flags as carrying a preferred market
+  // first, then the rest — sorted by soonest kickoff so the capped set is the
+  // most relevant.
   const sorted = [...fixtures].sort((a, b) => a.kickoff.getTime() - b.kickoff.getTime());
-  const preferredFirst = [
+  const candidates = [
     ...sorted.filter(f => f.hasPreferred),
     ...sorted.filter(f => !f.hasPreferred),
-  ];
-  const candidates = preferredFirst.slice(0, cap);
+  ].slice(0, cap);
 
-  const out: FoulsFixture[] = [];
+  const out: ConfirmedFixture[] = [];
   let done = 0;
   for (const fx of candidates) {
     done++;
-    opts?.onProgress?.(`Checking fouls markets ${done}/${candidates.length}…`);
+    opts?.onProgress?.(`Checking markets ${done}/${candidates.length}…`);
     let pf: PreferredFixture;
     try {
       pf = await fetchFixtureMarkets(fx, { region });
     } catch {
       continue;
     }
-    const fouls = pf.markets.filter(r => r.key === 'home_fouls' || r.key === 'away_fouls');
-    if (fouls.length === 0) continue; // this fixture doesn't carry fouls — skip
+    const rows = pf.markets.filter(r => keySet.has(r.key));
+    if (rows.length === 0) continue; // fixture doesn't carry the requested markets
     out.push({
       eventId: fx.eventId,
+      gameId: fx.gameId,
       homeTeam: fx.homeTeam,
       awayTeam: fx.awayTeam,
       league: fx.league,
@@ -654,12 +671,28 @@ export async function confirmFoulsFixtures(opts?: {
       kickoff: fx.kickoff,
       date: fx.date,
       time: fx.time,
-      fouls,
-      anyOpen: fouls.some(r => !r.locked),
+      markets: rows,
+      anyOpen: rows.some(r => !r.locked),
     });
   }
-  opts?.onProgress?.(`Found ${out.length} fixture(s) offering fouls.`);
+  opts?.onProgress?.(`Found ${out.length} fixture(s) with the requested markets.`);
   return out;
+}
+
+/**
+ * Fouls-tab convenience wrapper — confirms fouls markets and exposes the rows as
+ * `fouls` (what FoulsStrategy consumes) in addition to the generic `markets`.
+ */
+export async function confirmFoulsFixtures(opts?: {
+  region?: SportyRegion;
+  window?: TimeWindow;
+  maxPages?: number;
+  pageSize?: number;
+  cap?: number;
+  onProgress?: (msg: string) => void;
+}): Promise<FoulsFixture[]> {
+  const confirmed = await confirmPreferredFixtures(FOULS_KEYS, opts);
+  return confirmed.map(c => ({ ...c, fouls: c.markets }));
 }
 
 /**
