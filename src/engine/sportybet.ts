@@ -119,21 +119,22 @@ export const PREFERRED_MARKETS: PreferredMarketDef[] = [
   { key: 'ten_min_1x2', label: '10 Minutes - 1X2', section: 'Other', ids: ['105'] },
 
   // ── Fouls (shown in the dedicated Fouls tab) ──
+  // ID-ONLY matching (no desc fallback): a loose "desc contains 'foul'" rule
+  // wrongly swept in Player Fouls (800291), Player Fouls Won (800097), H2H Most
+  // Fouls (830291), Fouls 1X2 (900539/900647) and the 1st-half fouls markets
+  // (900541/900686/900687). Only these three team/match TOTAL O/U markets belong.
   {
     key: 'home_fouls', label: 'Home Team Fouls O/U', section: 'Fouls', ids: ['900544'],
-    match: (d, g) => (d.includes('foul') && d.includes('home')) || (g === 'fouls' && d.includes('home')),
     surfaceWhenLocked: true,
   },
   {
     key: 'away_fouls', label: 'Away Team Fouls O/U', section: 'Fouls', ids: ['900545'],
-    match: (d, g) => (d.includes('foul') && d.includes('away')) || (g === 'fouls' && d.includes('away')),
     surfaceWhenLocked: true,
   },
-  // Match-total fouls (both teams). No home/away in desc; bucket under home_fouls
-  // so it still surfaces. Kept last so home/away ids match first.
+  // Match-total fouls (both teams). Bucketed under home_fouls so it still
+  // surfaces in the fouls set. Id-only.
   {
     key: 'home_fouls', label: 'Match Fouls O/U', section: 'Fouls', ids: ['900342'],
-    match: (d) => d.includes('foul') && !d.includes('home') && !d.includes('away'),
     surfaceWhenLocked: true,
   },
 ];
