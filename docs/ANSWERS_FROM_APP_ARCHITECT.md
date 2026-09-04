@@ -17,7 +17,7 @@ your mapping table against it.
 **`market_key` values (21):**
 
 `1x2_1up`, `1x2_2up`, `dc_1up`, `1x2_ou`, `dc_ou`, `dc_ggng`, `ou_ggng`, `1x2_ggng`,
-`home_or_ou25`, `away_or_ou25`, `win_either_half`, `highest_scoring_half`, `fh_1x2_ou`,
+`home_or_ou25`, `away_or_ou25`, `win_either_half_home`, `win_either_half_away`, `highest_scoring_half`, `fh_1x2_ou`,
 `fh_dc`, `fh_1x2_ggng`, `home_corners`, `away_corners`, `home_ou`, `away_ou`,
 `score_3_in_row`, `ten_min_1x2`
 
@@ -35,7 +35,7 @@ your mapping table against it.
 | `dc_ggng` | `Home or Draw & yes`, … | combo |
 | `ou_ggng` | e.g. `Over 2.5 & yes` | combo |
 | `home_or_ou25` / `away_or_ou25` | `Home or Over 2.5`, `Home or Under 2.5` | combo |
-| `win_either_half` | `Home` / `Away` (label distinguishes home/away market) | your Win-Either-Half |
+| `win_either_half_home` / `win_either_half_away` | line is **`Yes`** / **`No`** (key carries the side) | your Win-Either-Half: map `Home`→(`win_either_half_home`,`Yes`), `Away`→(`win_either_half_away`,`Yes`) |
 | `highest_scoring_half` | `1st Half` / `2nd Half` / `Equal` | half market |
 | `fh_1x2_ou` / `fh_dc` / `fh_1x2_ggng` | 1st-half variants of the above | half combos |
 | `score_3_in_row` | `Home` / `Away` / `Any` | special |
@@ -279,3 +279,28 @@ Not done in this pass.
 
 You were not over-reaching. These were exactly the app's responsibility. Run a pull + "Price all
 upcoming" and the whole odds/edge/rollover layer should light up on real numbers.
+
+
+---
+
+# Correction — Win Either Half odds ARE written; vocabulary was wrong in my earlier answer
+
+You reported WEH showing `odds: None`. I verified against the live DB: `preferred_markets` had
+**2,360 `win_either_half` rows with real odds** — so the app was writing them fine. The `None`
+was an **odds-attach miss on the predictor side**, caused by a vocabulary mismatch I documented
+incorrectly:
+
+- My earlier table said WEH `line` was `Home`/`Away`. **That was wrong.** The actual line is
+  **`Yes`/`No`**, and the home/away side was buried in `market_label`
+  (`Home/Away Team to Win Either Half`) — so a predictor joining on `line="Home"` found nothing.
+
+**Fix (app side):** split WEH into two unambiguous keys so it joins cleanly:
+
+| market_key | SportyBet id | line | means |
+|---|---|---|---|
+| `win_either_half_home` | 50 | `Yes` / `No` | does the HOME team win either half |
+| `win_either_half_away` | 51 | `Yes` / `No` | does the AWAY team win either half |
+
+So map your predictor pick: **`Win Either Half / Home` → (`win_either_half_home`, `Yes`)** and
+**`/ Away` → (`win_either_half_away`, `Yes`)**. Requires a fresh **Price all upcoming** run so the
+new keys land in `preferred_markets` (the old `win_either_half` rows get overwritten per-event).

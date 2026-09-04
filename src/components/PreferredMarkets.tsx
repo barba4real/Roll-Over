@@ -121,7 +121,8 @@ export default function PreferredMarkets({ onImport }: Props) {
       case 'dc_1up': return 'bg-emerald-900 text-emerald-300';
       case 'home_fouls': return 'bg-amber-900 text-amber-300';
       case 'away_fouls': return 'bg-orange-900 text-orange-300';
-      case 'win_either_half': return 'bg-blue-900 text-blue-300';
+      case 'win_either_half_home': return 'bg-blue-900 text-blue-300';
+      case 'win_either_half_away': return 'bg-blue-900 text-blue-300';
       default: return 'bg-gray-700 text-gray-300';
     }
   };

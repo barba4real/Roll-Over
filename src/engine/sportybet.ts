@@ -58,7 +58,7 @@ export type PreferredMarketKey =
   | '1x2_ou' | 'dc_ou' | 'dc_ggng' | 'ou_ggng' | '1x2_ggng'
   | 'home_or_ou25' | 'away_or_ou25'
   // Halves
-  | 'win_either_half' | 'highest_scoring_half' | 'fh_1x2_ou' | 'fh_dc' | 'fh_1x2_ggng'
+  | 'win_either_half_home' | 'win_either_half_away' | 'highest_scoring_half' | 'fh_1x2_ou' | 'fh_dc' | 'fh_1x2_ggng'
   // Corners
   | 'home_corners' | 'away_corners'
   // Team totals
@@ -108,7 +108,10 @@ export const PREFERRED_MARKETS: PreferredMarketDef[] = [
   { key: 'away_or_ou25', label: 'Away Team or Over/Under 2.5', section: 'Combos', ids: ['858', '859'] },
 
   // ── Halves ──
-  { key: 'win_either_half', label: 'Win Either Half', section: 'Halves', ids: ['50', '51'] },
+  // Split home/away into distinct keys so the predictor can join unambiguously
+  // (line is Yes/No; the key carries the home/away side).
+  { key: 'win_either_half_home', label: 'Home to Win Either Half', section: 'Halves', ids: ['50'] },
+  { key: 'win_either_half_away', label: 'Away to Win Either Half', section: 'Halves', ids: ['51'] },
   { key: 'highest_scoring_half', label: 'Highest Scoring Half', section: 'Halves', ids: ['52', '53', '54'] },
   { key: 'fh_1x2_ou', label: '1st Half - 1X2 & Over/Under', section: 'Halves', ids: ['79'] },
   { key: 'fh_dc', label: '1st Half - Double Chance', section: 'Halves', ids: ['63'] },
@@ -408,12 +411,9 @@ function classifyPreferred(m: SbMarket): { key: PreferredMarketKey; marketLabel:
   return null;
 }
 
-/** Sharpen a generic registry label using the market desc (e.g. Win Either Half). */
-function refineLabel(def: PreferredMarketDef, descLower: string): string {
-  if (def.key === 'win_either_half') {
-    if (descLower.includes('home')) return 'Home Team to Win Either Half';
-    if (descLower.includes('away')) return 'Away Team to Win Either Half';
-  }
+/** Sharpen a generic registry label using the market desc. Currently a no-op
+ *  passthrough — home/away splits now have their own registry keys/labels. */
+function refineLabel(def: PreferredMarketDef, _descLower: string): string {
   return def.label;
 }
 
