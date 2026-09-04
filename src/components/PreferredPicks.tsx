@@ -87,6 +87,9 @@ export default function PreferredPicks({ onImport }: Props) {
   const [fOddsMax, setFOddsMax] = useState('');
   const [fOpenOnly, setFOpenOnly] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // Market rows are HIDDEN by default (the list is a clean fixture index). Rows
+  // show when a filter is active, or when a fixture is explicitly expanded.
+  const [expandedFixtures, setExpandedFixtures] = useState<Set<string>>(new Set());
 
   // Keep the module singleton in sync so navigation away/back restores instantly.
   useEffect(() => {
@@ -229,6 +232,9 @@ export default function PreferredPicks({ onImport }: Props) {
   function toggleCollapse(l: string) {
     setCollapsed(prev => { const n = new Set(prev); n.has(l) ? n.delete(l) : n.add(l); return n; });
   }
+  function toggleFixture(eventId: string) {
+    setExpandedFixtures(prev => { const n = new Set(prev); n.has(eventId) ? n.delete(eventId) : n.add(eventId); return n; });
+  }
 
   return (
     <div className="pb-20">
@@ -310,6 +316,7 @@ export default function PreferredPicks({ onImport }: Props) {
       {fixtures.length > 0 && (
         <div className="mb-2 text-[10px] text-gray-500">
           Showing {view.length} fixture(s), {shownRowCount} market(s){view.length !== fixtures.length && <span className="text-gray-600"> (filtered from {fixtures.length})</span>}
+          {!hasAnyFilter && <span className="text-gray-600"> · markets hidden — click a fixture or apply a filter to reveal</span>}
         </div>
       )}
 
@@ -336,15 +343,27 @@ export default function PreferredPicks({ onImport }: Props) {
                       bySection.get(sec)!.push(r);
                     }
                     const secs = SECTION_ORDER.filter(s => bySection.has(s));
+                    // Rows are shown only when a filter is active or this fixture
+                    // is explicitly expanded — otherwise just the header (index).
+                    const showRows = hasAnyFilter || expandedFixtures.has(fx.eventId);
                     return (
                       <div key={fx.eventId} className="p-3 rounded-lg border border-gray-700 bg-gray-800/60">
-                        <div className="flex items-center justify-between mb-1.5">
+                        <button
+                          onClick={() => toggleFixture(fx.eventId)}
+                          className="w-full flex items-center justify-between mb-1.5 text-left"
+                          title={showRows ? 'Hide markets' : 'Show markets'}
+                        >
                           <div>
+                            <span className="text-gray-500 w-3 inline-block">{showRows ? '▾' : '▸'}</span>
                             <span className="text-sm text-gray-200 font-medium">{fx.homeTeam} v {fx.awayTeam}</span>
                             <span className="ml-2 text-[10px] text-gray-500">{fx.date} {fx.time}</span>
                           </div>
-                          {!fx.anyOpen && <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-400" title="No open line yet — unlocks nearer kickoff">🔒 pre-stage</span>}
-                        </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-400">{rows.length} market{rows.length === 1 ? '' : 's'}</span>
+                            {!fx.anyOpen && <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-400" title="No open line yet — unlocks nearer kickoff">🔒</span>}
+                          </div>
+                        </button>
+                        {showRows && (
                         <div className="space-y-1.5">
                           {secs.map(sec => (
                             <div key={sec}>
@@ -377,6 +396,7 @@ export default function PreferredPicks({ onImport }: Props) {
                             </div>
                           ))}
                         </div>
+                        )}
                       </div>
                     );
                   })}
