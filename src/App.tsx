@@ -38,9 +38,35 @@ export interface StakedSlip {
 
 type View = 'home' | 'paste' | 'slips' | 'history' | 'fouls' | 'sporty' | 'preferred';
 
+// A selection's dedup identity: same fixture + same market + same pick.
+// (Duplicate = same fixture + same pick + same market — different picks on the
+// same match are kept.)
+function selectionKey(s: ParsedSelection): string {
+  return `${(s.homeTeam || '').toLowerCase()}|${(s.awayTeam || '').toLowerCase()}|${(s.market || '').toLowerCase()}|${(s.pick || '').toLowerCase()}`;
+}
+
+/**
+ * Merge incoming selections into an existing pool, deduped against BOTH the pool
+ * AND the incoming batch itself (the batch can contain internal repeats — e.g.
+ * the same fixture surfacing across pages/markets). One running set catches all.
+ */
+function mergeDedup(prev: ParsedSelection[], incoming: ParsedSelection[]): ParsedSelection[] {
+  const seen = new Set(prev.map(selectionKey));
+  const fresh: ParsedSelection[] = [];
+  for (const s of incoming) {
+    const k = selectionKey(s);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    fresh.push(s);
+  }
+  return fresh.length ? [...prev, ...fresh] : prev;
+}
+
 export default function App() {
   const [view, setView] = useState<View>('home');
-  const [selections, setSelections] = useState<ParsedSelection[]>(() => loadSelections());
+  // Dedup on load too, so any pool that already accumulated duplicates (from
+  // before the merge-dedup fix) collapses to one row per fixture+market+pick.
+  const [selections, setSelections] = useState<ParsedSelection[]>(() => mergeDedup([], loadSelections()));
   // Optional subset the Slip Builder uses (e.g. one day's picks filtered from the
   // master pool). null = builder uses the full selections list. This lets the
   // master 2-week pool stay intact while you build one day at a time.
@@ -576,17 +602,8 @@ export default function App() {
       const text = e.target?.result as string;
       const result = importSelections(text);
       if (result.success && result.selections) {
-        // Merge with existing, dedup by homeTeam+awayTeam+pick+market
-        setSelections(prev => {
-          const existingKeys = new Set(prev.map(s =>
-            `${s.homeTeam.toLowerCase()}|${s.awayTeam.toLowerCase()}|${s.pick.toLowerCase()}|${s.market.toLowerCase()}`
-          ));
-          const newPicks = result.selections!.filter(s => {
-            const key = `${s.homeTeam.toLowerCase()}|${s.awayTeam.toLowerCase()}|${s.pick.toLowerCase()}|${s.market.toLowerCase()}`;
-            return !existingKeys.has(key);
-          });
-          return [...prev, ...newPicks];
-        });
+        // Merge with existing; dedup against the pool AND within the import batch.
+        setSelections(prev => mergeDedup(prev, result.selections!));
       } else {
         alert(result.error || 'Import failed');
       }
@@ -668,7 +685,7 @@ export default function App() {
           return isNaN(k) || k > now - GRACE_MS;
         });
         if (future.length > 0) {
-          setSelections(future);
+          setSelections(mergeDedup([], future)); // dedup the pasted batch internally
           setView('paste');
         }
       }
@@ -701,12 +718,7 @@ export default function App() {
       if (future.length === 0) {
         setSbMsg('No upcoming SportyBet fixtures found. If this persists, redeploy the Cloudflare Worker (sportybet.com must be whitelisted).');
       } else {
-        setSelections(prev => {
-          const keyOf = (s: typeof future[number]) => `${s.homeTeam.toLowerCase()}|${s.awayTeam.toLowerCase()}|${s.market.toLowerCase()}|${s.pick.toLowerCase()}`;
-          const existing = new Set(prev.map(keyOf));
-          const fresh = future.filter(s => !existing.has(keyOf(s)));
-          return [...prev, ...fresh];
-        });
+        setSelections(prev => mergeDedup(prev, future));
         setSbMsg(`Imported ${future.length} SportyBet selections.`);
         setView('paste');
       }
@@ -1332,12 +1344,7 @@ export default function App() {
                 return isNaN(k) || k > now - GRACE_MS;
               });
               if (future.length === 0) return;
-              setSelections(prev => {
-                const keyOf = (s: ParsedSelection) => `${s.homeTeam.toLowerCase()}|${s.awayTeam.toLowerCase()}|${s.market.toLowerCase()}|${s.pick.toLowerCase()}`;
-                const existing = new Set(prev.map(keyOf));
-                const fresh = future.filter(s => !existing.has(keyOf(s)));
-                return [...prev, ...fresh];
-              });
+              setSelections(prev => mergeDedup(prev, future));
             }} />
           </div>
         )}
@@ -1353,12 +1360,7 @@ export default function App() {
                 return isNaN(k) || k > now - GRACE_MS;
               });
               if (future.length === 0) return;
-              setSelections(prev => {
-                const keyOf = (s: ParsedSelection) => `${s.homeTeam.toLowerCase()}|${s.awayTeam.toLowerCase()}|${s.market.toLowerCase()}|${s.pick.toLowerCase()}`;
-                const existing = new Set(prev.map(keyOf));
-                const fresh = future.filter(s => !existing.has(keyOf(s)));
-                return [...prev, ...fresh];
-              });
+              setSelections(prev => mergeDedup(prev, future));
             }} />
           </div>
         )}
