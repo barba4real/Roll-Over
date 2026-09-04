@@ -980,10 +980,22 @@ Your D4 strategy — restrict fuzzy candidates by `league_id` before matching �
 
 - **Predictor-side (now):** keep a small `league_map.json` (Appendix E3) mapping the ~15 clean
   SportyBet strings → slugs; scope candidates when a fixture's league maps.
-- **App-side (DONE — owner approved):** the Roll-Over app now stamps the resolved `league_id`
-  directly onto `upcoming_fixtures` (the app maps SportyBet's `country`+`leagueName` to its
-  registry slug at pull time). **So `upcoming_fixtures.league_id` is populated** — scope on it
-  directly and you can **retire `league_map.json`** for DB-slate fixtures. Notes:
+- **App-side (DONE — owner approved; mapping bug FIXED):** the Roll-Over app stamps the resolved
+  `league_id` directly onto `upcoming_fixtures`, mapping SportyBet's `country`+`leagueName` to its
+  registry slug at pull time.
+  > **⚠️ Correction (post-verification):** the first version of this mapping matched on league
+  > *name only* and ignored country — so `Armenia: Premier League`, `Ukraine: Premier League`,
+  > `Algeria: Ligue 1`, `Austria: Bundesliga`→German, `Ecuador: Serie B`→Italian, etc. were all
+  > wrongly assigned to the top-5 slugs, and `Spain: LaLiga` came back NULL. **This is fixed.** The
+  > resolver is now **country-gated**: a league only maps to a slug whose region equals the
+  > fixture's country; untracked countries return NULL; loose substring matching was removed so
+  > lower tiers (`2. Liga`, `3. Liga`, `1. Lig`) no longer collapse onto the top flight. Verified
+  > against the live slate: **18 clean leagues map correctly** (incl. `Spain: LaLiga → esp-la-liga`),
+  > and every cross-country case correctly returns NULL. **Requires a fresh pull in the fixed build
+  > to re-stamp** — the old rows on disk carry the buggy values until then.
+
+  Once re-stamped, scope on `upcoming_fixtures.league_id` directly and you can **retire
+  `league_map.json`** for DB-slate fixtures. Notes:
   - It's **NULL for long-tail leagues** the app doesn't track (the same clubs that are the
     unresolvable floor in G3) — fall back to name-present-in-DB + fuzzy when `league_id` is NULL.
   - Coverage is the ~15 clean D4 leagues plus the major cups (mapping is conservative — a NULL

@@ -917,8 +917,14 @@ export function getProviderCoverage(league: LeagueEntry): string[] {
 // ─── SportyBet league → registry slug resolver ───────────────────────────────
 // Maps a SportyBet fixture's (country, leagueName) to the registry `id` slug
 // (e.g. "Spain" + "LaLiga" → "esp-la-liga") so the DB fixture carries the same
-// league_id the historical data uses. Conservative: returns null when there's no
-// confident match (the long tail SportyBet shows but we don't track).
+// league_id the historical data uses.
+//
+// COUNTRY-GATED BY DESIGN: a league only maps to a slug whose registry `region`
+// matches the fixture's country. If the country isn't one of our tracked regions
+// (Armenia, Ukraine, Algeria, Ecuador, …), we return NULL immediately — we do
+// NOT map "Armenia: Premier League" to the English PL. A wrong slug is far worse
+// than NULL (it would scope resolution against the wrong league's history), so
+// this errs hard toward NULL.
 
 function normLeague(s: string): string {
   return (s || '')
@@ -929,86 +935,106 @@ function normLeague(s: string): string {
     .trim();
 }
 
-// Direct overrides where SportyBet's label differs from the registry name.
-// Keyed by normalized SportyBet leagueName. Value = registry id.
-const SPORTY_LEAGUE_OVERRIDES: Record<string, string> = {
-  'laliga': 'esp-la-liga',
-  'laliga hypermotion': 'esp-la-liga-2',
-  'la liga 2': 'esp-la-liga-2',
-  'premier league': 'eng-premier-league',      // resolved with country=England below
-  'championship': 'eng-championship',
-  'league one': 'eng-league-one',
-  '2 bundesliga': 'ger-2-bundesliga',
-  'bundesliga': 'ger-bundesliga',
-  'serie a': 'ita-serie-a',
-  'serie b': 'ita-serie-b',
-  'ligue 1': 'fra-ligue-1',
-  'ligue 2': 'fra-ligue-2',
-  'eredivisie': 'ned-eredivisie',
-  'liga portugal': 'por-primeira-liga',
-  'primeira liga': 'por-primeira-liga',
-  'super lig': 'tur-super-lig',
-  'turkey super lig': 'tur-super-lig',
-  'super league': 'gre-super-league',          // Greece (guard with country)
-  'premiership': 'sco-premiership',            // Scotland (guard with country)
-  'pro league': 'bel-pro-league',
-  'jupiler pro league': 'bel-pro-league',
-  'primera division': 'arg-liga-profesional',
-  'liga profesional': 'arg-liga-profesional',
-  'brasileiro serie a': 'bra-serie-a',
-  'j1 league': 'jpn-j-league',
-  'k league 1': null as unknown as string,     // not in registry — leave null
-  'uefa nations league': 'uefa-nations-league',
-  'uefa champions league': 'uefa-champions-league',
-  'uefa europa league': 'uefa-europa-league',
-  'uefa conference league': 'uefa-conference-league',
-  'conmebol libertadores': 'conmebol-libertadores',
+// SportyBet country label (normalized) → our LeagueRegion. Only the countries we
+// actually track have entries; everything else is intentionally absent → NULL.
+const COUNTRY_TO_REGION: Record<string, LeagueRegion> = {
+  'england': 'England',
+  'spain': 'Spain',
+  'germany': 'Germany',
+  'italy': 'Italy',
+  'france': 'France',
+  'netherlands': 'Netherlands',
+  'portugal': 'Portugal',
+  'scotland': 'Scotland',
+  'belgium': 'Belgium',
+  'turkiye': 'Turkey',
+  'turkey': 'Turkey',
+  'greece': 'Greece',
+  'austria': 'Austria',
+  // Scandinavia (registry groups these under one region)
+  'denmark': 'Scandinavia',
+  'norway': 'Scandinavia',
+  'sweden': 'Scandinavia',
 };
 
-// Country guards: some league names collide across countries ("Super League",
-// "Premiership"). Only accept the override if the country is consistent.
-const OVERRIDE_COUNTRY_GUARD: Record<string, LeagueRegion> = {
-  'sco-premiership': 'Scotland',
-  'gre-super-league': 'Greece',
+// Within a region, map the normalized SportyBet league name → registry id.
+// Because we've ALREADY gated on country/region, these names are unambiguous.
+// Keyed by `${region}|${normalizedLeagueName}`.
+const LEAGUE_BY_REGION_NAME: Record<string, string> = {
+  // England
+  'England|premier league': 'eng-premier-league',
+  'England|championship': 'eng-championship',
+  'England|league one': 'eng-league-one',
+  // Spain
+  'Spain|laliga': 'esp-la-liga',
+  'Spain|la liga': 'esp-la-liga',
+  'Spain|laliga hypermotion': 'esp-la-liga-2',
+  'Spain|la liga 2': 'esp-la-liga-2',
+  // Germany  (normLeague strips the leading "2." → "bundesliga"; disambiguate by
+  //           checking the raw for a leading "2")
+  'Germany|bundesliga': 'ger-bundesliga',
+  'Germany|2 bundesliga': 'ger-2-bundesliga',
+  // Italy
+  'Italy|serie a': 'ita-serie-a',
+  'Italy|serie b': 'ita-serie-b',
+  // France
+  'France|ligue 1': 'fra-ligue-1',
+  'France|ligue 2': 'fra-ligue-2',
+  // Netherlands
+  'Netherlands|eredivisie': 'ned-eredivisie',
+  // Portugal
+  'Portugal|liga portugal': 'por-primeira-liga',
+  'Portugal|primeira liga': 'por-primeira-liga',
+  // Scotland
+  'Scotland|premiership': 'sco-premiership',
+  'Scotland|scottish premiership': 'sco-premiership',
+  'Scotland|championship': 'sco-premiership',   // no separate sco-championship slug; skip via note
+  // Belgium
+  'Belgium|pro league': 'bel-pro-league',
+  'Belgium|jupiler pro league': 'bel-pro-league',
+  // Turkey
+  'Turkey|super lig': 'tur-super-lig',
+  // Greece
+  'Greece|super league': 'gre-super-league',
+  // Austria
+  'Austria|bundesliga': 'aut-bundesliga',
 };
 
 /**
  * Resolve a SportyBet (country, leagueName) to the registry `id` slug, or null.
+ * Country-gated: never maps across countries.
  */
 export function resolveSportyLeagueId(country: string, leagueName: string): string | null {
+  const rawLn = (leagueName || '').toLowerCase();
   const ln = normLeague(leagueName);
-  if (!ln) return null;
-
-  // 1) Direct override (guarded by country where a name collides).
-  if (ln in SPORTY_LEAGUE_OVERRIDES) {
-    const id = SPORTY_LEAGUE_OVERRIDES[ln];
-    if (!id) return null;
-    const guard = OVERRIDE_COUNTRY_GUARD[id];
-    if (guard && country && normLeague(country) !== normLeague(guard)) {
-      // country mismatch for a collision-prone name — fall through to fuzzy
-    } else {
-      return id;
-    }
-  }
-
-  // 2) Exact registry-name match (optionally scoped by country/region).
   const cn = normLeague(country);
-  const byName = LEAGUE_REGISTRY.filter(l => normLeague(l.name) === ln);
-  if (byName.length === 1) return byName[0].id;
-  if (byName.length > 1 && cn) {
-    const inRegion = byName.find(l => normLeague(l.region) === cn);
-    if (inRegion) return inRegion.id;
-  }
+  if (!ln || !cn) return null;
 
-  // 3) Contains-match within the same region (conservative).
-  if (cn) {
-    const regionLeagues = LEAGUE_REGISTRY.filter(l => normLeague(l.region) === cn);
-    const hit = regionLeagues.find(l => {
-      const rn = normLeague(l.name);
-      return rn === ln || rn.includes(ln) || ln.includes(rn);
-    });
-    if (hit) return hit.id;
-  }
+  // 1) Country MUST map to a region we track. If not, bail — no cross-country.
+  const region = COUNTRY_TO_REGION[cn];
+  if (!region) return null;
 
-  return null; // no confident match — long-tail league we don't track
+  // 2) German 2. Bundesliga special-case: normLeague strips the "2." prefix, so
+  //    recover it from the raw string before the lookup.
+  if (region === 'Germany' && /\b2\.?\s*bundesliga\b/.test(rawLn)) {
+    return 'ger-2-bundesliga';
+  }
+  // Scotland Championship has no dedicated slug in the registry — don't force it
+  // onto the Premiership. Leave it NULL (falls back to name/fuzzy on predictor).
+  if (region === 'Scotland' && ln === 'championship') return null;
+
+  // 3) Exact region+name lookup (unambiguous because country is fixed).
+  //    This is the ONLY mapping path — no loose "contains" fuzz, because that
+  //    wrongly collapsed lower tiers onto the top flight (e.g. Austria "2. Liga",
+  //    Germany "3. Liga", Turkey "1. Lig" all leaked onto the top slug). A tier
+  //    we don't have a dedicated slug for must stay NULL, not be force-matched.
+  const key = `${region}|${ln}`;
+  if (key in LEAGUE_BY_REGION_NAME) return LEAGUE_BY_REGION_NAME[key];
+
+  // Also accept an exact match against the registry's own display name within
+  // this region (still exact — no substring fuzz).
+  const exact = LEAGUE_REGISTRY.find(l => l.region === region && normLeague(l.name) === ln);
+  if (exact) return exact.id;
+
+  return null; // in a tracked country but not a league we map — safe NULL
 }
