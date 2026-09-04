@@ -140,6 +140,7 @@ pulls and time-windows. Reading it removes the paste step and gives you SportyBe
 | `country` | TEXT | e.g. `England` |
 | `league_name` | TEXT | e.g. `Premier League` |
 | `league` | TEXT | `Country: League`, e.g. `England: Premier League` |
+| `league_id` | TEXT | **resolved DB slug** (e.g. `esp-la-liga`) matching `historical_matches.league_id`, or NULL for long-tail leagues the app doesn't track. Use this to league-scope resolution directly — no `league_map.json` needed. |
 | `kickoff_ms` | INTEGER | kickoff, epoch **milliseconds** (divide by 1000 for a datetime) |
 | `date` | TEXT | `DD/MM` |
 | `time` | TEXT | `HH:MM` |
@@ -979,10 +980,18 @@ Your D4 strategy — restrict fuzzy candidates by `league_id` before matching �
 
 - **Predictor-side (now):** keep a small `league_map.json` (Appendix E3) mapping the ~15 clean
   SportyBet strings → slugs; scope candidates when a fixture's league maps.
-- **App-side (offered):** the Roll-Over app can stamp the resolved `league_id` directly onto
-  `upcoming_fixtures` so you get the slug for free. **This is available on request** — if the owner
-  approves it, a `league_id` column appears on `upcoming_fixtures` and you scope on it directly
-  with no mapping file. Flag it if G5 becomes your accuracy bottleneck.
+- **App-side (DONE — owner approved):** the Roll-Over app now stamps the resolved `league_id`
+  directly onto `upcoming_fixtures` (the app maps SportyBet's `country`+`leagueName` to its
+  registry slug at pull time). **So `upcoming_fixtures.league_id` is populated** — scope on it
+  directly and you can **retire `league_map.json`** for DB-slate fixtures. Notes:
+  - It's **NULL for long-tail leagues** the app doesn't track (the same clubs that are the
+    unresolvable floor in G3) — fall back to name-present-in-DB + fuzzy when `league_id` is NULL.
+  - Coverage is the ~15 clean D4 leagues plus the major cups (mapping is conservative — a NULL
+    means "no confident match," never a wrong slug).
+  - Requires a fixture pull in the current app build for the column to populate; older rows get
+    it back-filled on the next pull (the column was added backward-compatibly via ALTER TABLE).
+  - Paste-sourced fixtures still have no league metadata, so keep `league_map.json`/name-scoping
+    as the fallback path for §4B.
 
 ### G6 — Recommended order for the architect
 

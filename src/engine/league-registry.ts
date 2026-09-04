@@ -913,3 +913,102 @@ export function getProviderCoverage(league: LeagueEntry): string[] {
   if (league.oddsApiKey) providers.push('Odds-API');
   return providers;
 }
+
+// ─── SportyBet league → registry slug resolver ───────────────────────────────
+// Maps a SportyBet fixture's (country, leagueName) to the registry `id` slug
+// (e.g. "Spain" + "LaLiga" → "esp-la-liga") so the DB fixture carries the same
+// league_id the historical data uses. Conservative: returns null when there's no
+// confident match (the long tail SportyBet shows but we don't track).
+
+function normLeague(s: string): string {
+  return (s || '')
+    .toLowerCase()
+    .replace(/^\s*\d+\s*\.?\s*/, '')        // leading "1." / "2 "
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Direct overrides where SportyBet's label differs from the registry name.
+// Keyed by normalized SportyBet leagueName. Value = registry id.
+const SPORTY_LEAGUE_OVERRIDES: Record<string, string> = {
+  'laliga': 'esp-la-liga',
+  'laliga hypermotion': 'esp-la-liga-2',
+  'la liga 2': 'esp-la-liga-2',
+  'premier league': 'eng-premier-league',      // resolved with country=England below
+  'championship': 'eng-championship',
+  'league one': 'eng-league-one',
+  '2 bundesliga': 'ger-2-bundesliga',
+  'bundesliga': 'ger-bundesliga',
+  'serie a': 'ita-serie-a',
+  'serie b': 'ita-serie-b',
+  'ligue 1': 'fra-ligue-1',
+  'ligue 2': 'fra-ligue-2',
+  'eredivisie': 'ned-eredivisie',
+  'liga portugal': 'por-primeira-liga',
+  'primeira liga': 'por-primeira-liga',
+  'super lig': 'tur-super-lig',
+  'turkey super lig': 'tur-super-lig',
+  'super league': 'gre-super-league',          // Greece (guard with country)
+  'premiership': 'sco-premiership',            // Scotland (guard with country)
+  'pro league': 'bel-pro-league',
+  'jupiler pro league': 'bel-pro-league',
+  'primera division': 'arg-liga-profesional',
+  'liga profesional': 'arg-liga-profesional',
+  'brasileiro serie a': 'bra-serie-a',
+  'j1 league': 'jpn-j-league',
+  'k league 1': null as unknown as string,     // not in registry — leave null
+  'uefa nations league': 'uefa-nations-league',
+  'uefa champions league': 'uefa-champions-league',
+  'uefa europa league': 'uefa-europa-league',
+  'uefa conference league': 'uefa-conference-league',
+  'conmebol libertadores': 'conmebol-libertadores',
+};
+
+// Country guards: some league names collide across countries ("Super League",
+// "Premiership"). Only accept the override if the country is consistent.
+const OVERRIDE_COUNTRY_GUARD: Record<string, LeagueRegion> = {
+  'sco-premiership': 'Scotland',
+  'gre-super-league': 'Greece',
+};
+
+/**
+ * Resolve a SportyBet (country, leagueName) to the registry `id` slug, or null.
+ */
+export function resolveSportyLeagueId(country: string, leagueName: string): string | null {
+  const ln = normLeague(leagueName);
+  if (!ln) return null;
+
+  // 1) Direct override (guarded by country where a name collides).
+  if (ln in SPORTY_LEAGUE_OVERRIDES) {
+    const id = SPORTY_LEAGUE_OVERRIDES[ln];
+    if (!id) return null;
+    const guard = OVERRIDE_COUNTRY_GUARD[id];
+    if (guard && country && normLeague(country) !== normLeague(guard)) {
+      // country mismatch for a collision-prone name — fall through to fuzzy
+    } else {
+      return id;
+    }
+  }
+
+  // 2) Exact registry-name match (optionally scoped by country/region).
+  const cn = normLeague(country);
+  const byName = LEAGUE_REGISTRY.filter(l => normLeague(l.name) === ln);
+  if (byName.length === 1) return byName[0].id;
+  if (byName.length > 1 && cn) {
+    const inRegion = byName.find(l => normLeague(l.region) === cn);
+    if (inRegion) return inRegion.id;
+  }
+
+  // 3) Contains-match within the same region (conservative).
+  if (cn) {
+    const regionLeagues = LEAGUE_REGISTRY.filter(l => normLeague(l.region) === cn);
+    const hit = regionLeagues.find(l => {
+      const rn = normLeague(l.name);
+      return rn === ln || rn.includes(ln) || ln.includes(rn);
+    });
+    if (hit) return hit.id;
+  }
+
+  return null; // no confident match — long-tail league we don't track
+}

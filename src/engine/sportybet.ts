@@ -25,6 +25,7 @@
 
 import { httpGet } from '../lib/http';
 import { ParsedSelection } from './types';
+import { resolveSportyLeagueId } from './league-registry';
 
 // Market IDs we care about (comma-joined in the query). Covers the user's
 // staking vocabulary: 1X2, O/U, Double Chance, GG/NG, DNB, Odd/Even, Handicap,
@@ -178,6 +179,9 @@ export interface SbFixture {
   country: string;                 // e.g. "England"
   leagueName: string;              // e.g. "Premier League"
   league: string;                  // "Country: League" (display)
+  leagueId: string | null;         // resolved registry slug (e.g. "esp-la-liga")
+                                   // matching historical_matches.league_id, or null
+                                   // for long-tail leagues we don't track
   kickoff: Date;
   date: string;                    // DD/MM
   time: string;                    // HH:MM
@@ -574,6 +578,7 @@ export async function fetchSportyBetFixtures(opts?: {
             country,
             leagueName,
             league,
+            leagueId: resolveSportyLeagueId(country, leagueName),
             kickoff,
             date: `${pad2(kickoff.getDate())}/${pad2(kickoff.getMonth() + 1)}`,
             time: `${pad2(kickoff.getHours())}:${pad2(kickoff.getMinutes())}`,

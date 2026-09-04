@@ -104,6 +104,7 @@ async function ensureTable() {
       country TEXT,
       league_name TEXT,
       league TEXT,
+      league_id TEXT,
       kickoff_ms INTEGER,
       date TEXT,
       time TEXT,
@@ -114,6 +115,9 @@ async function ensureTable() {
     )
   `);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_upcoming_kickoff ON upcoming_fixtures(kickoff_ms)`);
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_upcoming_league_id ON upcoming_fixtures(league_id)`);
+  // Backward-compat: add league_id to a pre-existing table (ignore if present).
+  try { await db.execute(`ALTER TABLE upcoming_fixtures ADD COLUMN league_id TEXT`); } catch {}
 }
 
 /** Serialize a SbFixture for JSON storage (Date -> epoch ms). */
@@ -149,20 +153,20 @@ async function persist() {
       const kickoffMs = f.kickoff instanceof Date ? f.kickoff.getTime() : Number(f.kickoff) || null;
       await db.execute(
         `INSERT OR IGNORE INTO upcoming_fixtures
-           (event_id, game_id, home_team, away_team, country, league_name, league,
+           (event_id, game_id, home_team, away_team, country, league_name, league, league_id,
             kickoff_ms, date, time, has_preferred, window, first_seen, last_seen)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)`,
         [
-          f.eventId, f.gameId, f.homeTeam, f.awayTeam, f.country, f.leagueName, f.league,
+          f.eventId, f.gameId, f.homeTeam, f.awayTeam, f.country, f.leagueName, f.league, f.leagueId ?? null,
           kickoffMs, f.date, f.time, f.hasPreferred ? 1 : 0, state.window, now,
         ]
       );
       await db.execute(
         `UPDATE upcoming_fixtures
            SET kickoff_ms = $2, has_preferred = $3, window = $4, last_seen = $5,
-               date = $6, time = $7, league = $8, league_name = $9
+               date = $6, time = $7, league = $8, league_name = $9, league_id = $10
          WHERE event_id = $1`,
-        [f.eventId, kickoffMs, f.hasPreferred ? 1 : 0, state.window, now, f.date, f.time, f.league, f.leagueName]
+        [f.eventId, kickoffMs, f.hasPreferred ? 1 : 0, state.window, now, f.date, f.time, f.league, f.leagueName, f.leagueId ?? null]
       );
     }
 
