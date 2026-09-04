@@ -196,6 +196,24 @@ const BASE = 'https://www.sportybet.com';
 /**
  * Fetch one page of upcoming football events, filtered to the given market IDs.
  */
+// SportyBet mixes computer-generated "Simulated Reality League" (SRL) / virtual
+// matches into the long-tail list views (option 2/3). These are NOT real
+// fixtures and must NEVER appear. Detect them by the tell-tale markers SportyBet
+// uses on the league and team names. Kept conservative so real leagues are safe.
+function isSimulatedFixture(parts: { league: string; leagueName: string; country: string; home: string; away: string }): boolean {
+  const hay = [parts.league, parts.leagueName, parts.country, parts.home, parts.away]
+    .map(s => (s || '').toLowerCase());
+  return hay.some(s =>
+    s.includes('simulated reality') ||
+    s.includes('simulated') ||
+    /\bsrl\b/.test(s) ||        // " SRL" suffix on SportyBet virtual leagues/teams
+    s.includes('esoccer') ||
+    s.includes('e-soccer') ||
+    /\bvirtual\b/.test(s) ||
+    s.includes('cyber')
+  );
+}
+
 async function fetchPageFor(region: SportyRegion, marketIds: string, pageNum: number, pageSize: number, option: number = 1): Promise<SbTournament[]> {
   const url = `${BASE}/api/${region}/factsCenter/pcUpcomingEvents`
     + `?sportId=sr:sport:1&marketId=${marketIds}`
@@ -482,6 +500,9 @@ export async function fetchSportyBetFixtures(opts?: {
           const country = ev.sport?.category?.name || '';
           const leagueName = ev.sport?.category?.tournament?.name || t.name || '';
           const league = country ? `${country}: ${leagueName}` : leagueName;
+
+          // Never include SportyBet's Simulated Reality League / virtual matches.
+          if (isSimulatedFixture({ league, leagueName, country, home: ev.homeTeamName, away: ev.awayTeamName })) continue;
 
           // Does this event actually carry a preferred market? (Fixtures come
           // from the full catalog now; this flag drives the "only my markets"
