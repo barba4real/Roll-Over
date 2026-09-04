@@ -13,8 +13,9 @@ Build a standalone Python CLI tool that:
 
 1. **Reads** the Roll-Over SQLite database (read-only) to learn each team's historical profile.
 2. **Gets the upcoming fixtures to predict** from either of two offline sources (see §4):
-   (a) the **`sb_fixture_cache` table** in the same read-only DB — the app's last SportyBet
-   fixture pull — or (b) a **pasted list** copied from SportyBet. Both are offline; no scraping.
+   (a) the **`upcoming_fixtures` table** in the same read-only DB — a durable, accumulating slate
+   of SportyBet fixtures the app has pulled (one row per fixture) — or (b) a **pasted list**
+   copied from SportyBet. Both are offline; no scraping.
 3. **Sorts and predicts** per-market outcomes for those fixtures — with **Team Fouls
    Over/Under as the priority market** — and prints a readable report (plus optional CSV).
 
@@ -27,11 +28,11 @@ The guiding principle discussed with the product owner:
 **Non-goals (do NOT do these):**
 
 - Do **not** scrape SportyBet or any provider, and make **no** network calls. Fixtures come only
-  from the read-only DB (`sb_fixture_cache`) or from paste — never from the live web.
+  from the read-only DB (`upcoming_fixtures`) or from paste — never from the live web.
 - Do **not** write to any table the Roll-Over app owns. If you persist output at all, use
-  your **own** table/file. (`sb_fixture_cache` is read-only to you, like every app table.)
+  your **own** table/file. (`upcoming_fixtures` is read-only to you, like every app table.)
 - Do **not** import, call, or depend on any Roll-Over TypeScript/Rust code.
-- Do **not** *require* the Roll-Over app to be running. (Reading `sb_fixture_cache` works whether
+- Do **not** *require* the Roll-Over app to be running. (Reading `upcoming_fixtures` works whether
   the app is open or closed — it's just a table in the DB file. Paste remains the fallback when
   the table is absent or stale.)
 
@@ -120,71 +121,72 @@ outcomes), but that's a stretch goal, not core.
 The upcoming fixtures come from SportyBet, via **either** of two fully-offline paths. Prefer (A);
 fall back to (B). Both are read-only; neither makes a network call.
 
-### 4A. Primary: read `sb_fixture_cache` from the DB
+### 4A. Primary: read `upcoming_fixtures` from the DB
 
-The Roll-Over app persists its **last SportyBet fixture pull** into a table in the same
-`rollover.db` you already open read-only. Reading it removes the paste step entirely and gives you
-SportyBet's exact slate (the book the owner plays), pre-attached to league names.
+The Roll-Over app persists every SportyBet fixture pull into a **durable, accumulating** table in
+the same `rollover.db` you already open read-only — **one row per fixture** (`event_id` primary
+key). Unlike a snapshot, it is *not* wiped by the next pull, so it grows into a stable slate across
+pulls and time-windows. Reading it removes the paste step and gives you SportyBet's exact fixtures
+(the book the owner plays), pre-attached to league names.
 
-**Schema:**
+**Schema (`upcoming_fixtures`):**
 
 | Column | Type | Notes |
 |---|---|---|
-| `id` | INTEGER PK | always `1` — single-row cache |
-| `payload` | TEXT | JSON blob (see below) |
-| `window` | TEXT | which time-window was pulled (`''`=all upcoming, `3h`, `6h`, `today`, `tomorrow`, `weekend`) |
-| `pulled_at` | INTEGER | epoch **milliseconds** of the pull |
+| `event_id` | TEXT PK | SportyBet event id, e.g. `sr:match:72221244` |
+| `game_id` | TEXT | nullable |
+| `home_team` | TEXT | SportyBet spelling — goes through the §5 resolver |
+| `away_team` | TEXT | SportyBet spelling |
+| `country` | TEXT | e.g. `England` |
+| `league_name` | TEXT | e.g. `Premier League` |
+| `league` | TEXT | `Country: League`, e.g. `England: Premier League` |
+| `kickoff_ms` | INTEGER | kickoff, epoch **milliseconds** (divide by 1000 for a datetime) |
+| `date` | TEXT | `DD/MM` |
+| `time` | TEXT | `HH:MM` |
+| `has_preferred` | INTEGER | `1` if the fixture offered a preferred market in the pull; else `0` |
+| `window` | TEXT | the time-window active when last seen (`''`=all, `3h`, `6h`, `today`, `tomorrow`, `weekend`) |
+| `first_seen` | INTEGER | epoch ms the fixture was first stored |
+| `last_seen` | INTEGER | epoch ms it was last refreshed by a pull |
 
-`payload` parses to:
-
-```json
-{
-  "fixtures": [
-    {
-      "eventId": "sr:match:72221244",
-      "gameId": "...",
-      "homeTeam": "Ipswich Town",
-      "awayTeam": "Liverpool",
-      "country": "England",
-      "leagueName": "Premier League",
-      "league": "England: Premier League",
-      "kickoff": 1789200000000,
-      "date": "16/08",
-      "time": "17:30",
-      "hasPreferred": true
-    }
-  ],
-  "leagues": ["England: Premier League", "..."]
-}
-```
+Indexed on `kickoff_ms`. The app prunes rows more than ~2 days past kickoff, so the table stays
+"upcoming/recent" without unbounded growth.
 
 Read snippet:
 
 ```python
-import json
-row = con.execute("SELECT payload, window, pulled_at FROM sb_fixture_cache WHERE id=1").fetchone()
-if row:
-    data = json.loads(row[0])
-    fixtures = data["fixtures"]           # each has homeTeam / awayTeam / leagueName / kickoff(ms)
-    pulled_at_ms = row[2]                 # epoch ms; divide by 1000 for datetime
+rows = con.execute("""
+    SELECT home_team, away_team, league, league_name, kickoff_ms, date, time, has_preferred
+    FROM upcoming_fixtures
+    WHERE kickoff_ms IS NULL OR kickoff_ms >= ?    -- only future/near kickoffs
+    ORDER BY kickoff_ms
+""", [int(time.time() * 1000)]).fetchall()
+# each row: SportyBet team spellings + kickoff in epoch ms -> still resolve via §5
 ```
 
 **Critical caveats — handle all three:**
 
-1. **Single-row snapshot, not a durable history.** The table holds only the *last* pull and is
-   overwritten each time. So you see whatever window the owner last pulled in the app — it may be
-   a narrow one (`3h`) or the full `~6k` slate (`''`). Read `window` + `pulled_at` and surface them
-   ("using SportyBet pull from 2h ago, window=today"). If the owner wants the full slate, they
-   pull "all upcoming" in the app before running you.
+1. **Team names are SportyBet's spellings** (`Ipswich Town`, `Man Utd`, …). They go through the
+   §5 resolver exactly like pasted names. Reading from the DB removes the *paste* step, not the
+   *matching* step.
 2. **The table may not exist / may be empty / may be stale.** It's created lazily on the app's
-   first pull. If the row is absent, or `pulled_at` is older than a freshness threshold you choose
-   (e.g. 12h), **fall back to paste (4B)** and say so.
-3. **`kickoff` is epoch milliseconds**, and **team names are SportyBet's spellings**
-   (`Ipswich Town`, `Man Utd`, …) — they still go through the §5 resolver exactly like pasted
-   names. Reading from the DB removes the *paste* step, not the *matching* step.
+   first pull in the current build. If it's absent or empty, or the newest `last_seen` is older
+   than a freshness threshold you choose (e.g. 12h), **fall back to paste (4B)** and say so.
+   Surface freshness ("using SportyBet fixtures last refreshed 2h ago").
+3. **Coverage reflects what the owner pulled.** A fixture only appears once the app has pulled a
+   window that includes it. If a wanted game is missing, either the owner pulls a wider window in
+   the app, or you add it via paste (see the `--source` union behavior below).
 
-`hasPreferred` means the fixture offered at least one of the owner's preferred markets in the
-app's pull — a weak positive signal, not a fouls guarantee. Do not treat it as "has fouls."
+`has_preferred = 1` means the fixture offered at least one of the owner's preferred markets in the
+pull — a weak positive signal, **not** a fouls guarantee. Do not treat it as "has fouls."
+
+#### 4A-legacy. Secondary: `sb_fixture_cache` (single-row snapshot)
+
+The app also keeps a single-row snapshot of the *last* pull in `sb_fixture_cache`
+(`id=1`, `payload` JSON, `window`, `pulled_at` epoch ms). It's used by the app UI for fast
+whole-list restore. You may read it as a fallback if `upcoming_fixtures` is unavailable, but
+**prefer `upcoming_fixtures`** — the snapshot only holds the most recent window and is overwritten
+each pull. Its `payload` JSON is `{ "fixtures": [ { eventId, homeTeam, awayTeam, country,
+leagueName, league, kickoff (ms), date, time, hasPreferred } ], "leagues": [...] }`.
 
 ### 4B. Fallback: pasted fixtures
 
@@ -373,22 +375,19 @@ teams = pd.unique(df[["home_team", "away_team"]].values.ravel())
 print("distinct teams:", len(teams))
 print("rows with fouls:", df["home_fouls"].notna().sum())   # expect this to be LOW
 
-# Upcoming fixtures cache (§4A) — may not exist yet if the app never pulled.
-import json
+# Upcoming fixtures — durable table (§4A). May not exist yet if the app never pulled.
 try:
-    row = con.execute("SELECT payload, window, pulled_at FROM sb_fixture_cache WHERE id=1").fetchone()
-    if row:
-        fx = json.loads(row[0]).get("fixtures", [])
-        print(f"sb_fixture_cache: {len(fx)} fixtures, window='{row[1]}', pulled_at(ms)={row[2]}")
-    else:
-        print("sb_fixture_cache: table exists but empty — use paste (§4B)")
+    n, newest = con.execute(
+        "SELECT COUNT(*), MAX(last_seen) FROM upcoming_fixtures"
+    ).fetchone()
+    print(f"upcoming_fixtures: {n} rows, newest last_seen(ms)={newest}")
 except Exception:
-    print("sb_fixture_cache: not present yet — use paste (§4B)")
+    print("upcoming_fixtures: not present yet — use paste (§4B)")
 con.close()
 ```
 
 If `rows with fouls` is small, that is expected — see §3 warning 1. Report it and design the
-fouls model around sample-size gating, not around assuming dense data. If `sb_fixture_cache` is
+fouls model around sample-size gating, not around assuming dense data. If `upcoming_fixtures` is
 absent/empty, that just means the app hasn't pulled fixtures in the current build yet — the paste
 path (§4B) covers that case.
 
@@ -455,11 +454,11 @@ docs/predictor-aliases-seed.json
 
 > **Offline boundary (read this first).** The Python predictor is **fully offline**. Its only
 > inputs are (1) the **read-only** `rollover.db` — both the `historical_matches` learning data and
-> the `sb_fixture_cache` upcoming-fixtures table (§4A) — and (2) **fixtures the user pastes**
-> (§4B). It does **not** connect to SportyBet, scan any catalog, check live market availability, or
-> make any network call. All references to SportyBet below explain *why the database looks the way
-> it does* — they are **not** steps the predictor performs. (Reading `sb_fixture_cache` is just a
-> local table read; it stays inside this boundary.)
+> the `upcoming_fixtures` slate (§4A) — and (2) **fixtures the user pastes** (§4B). It does **not**
+> connect to SportyBet, scan any catalog, check live market availability, or make any network call.
+> All references to SportyBet below explain *why the database looks the way it does* — they are
+> **not** steps the predictor performs. (Reading `upcoming_fixtures` is just a local table read; it
+> stays inside this boundary.)
 
 This answer is **derived from the actual `rollover.db`** (read-only probe on the target machine),
 not from a preference guess — because the data itself defines the scope. Two facts drive it:
