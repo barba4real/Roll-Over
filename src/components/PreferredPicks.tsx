@@ -276,6 +276,20 @@ export default function PreferredPicks({ onImport }: Props) {
       {/* ── Filters ── */}
       {fixtures.length > 0 && (
         <div className="mb-3 p-2 bg-gray-800 border border-gray-700 rounded-lg space-y-2">
+          {/* Time-window preset chips */}
+          <div className="flex items-center gap-1 flex-wrap">
+            {TIME_WINDOWS.map(tw => (
+              <button
+                key={tw.key || 'all'}
+                onClick={() => setFWin(tw.key)}
+                className={`px-2 py-0.5 text-[10px] font-medium rounded ${
+                  fWin === tw.key ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-400 hover:text-gray-200'
+                }`}
+              >
+                {tw.label}
+              </button>
+            ))}
+          </div>
           <div className="flex items-center gap-2 flex-wrap">
             <input
               value={fText}
@@ -283,9 +297,6 @@ export default function PreferredPicks({ onImport }: Props) {
               placeholder="Filter team or league…"
               className="flex-1 min-w-[140px] px-2 py-1 bg-gray-900 border border-gray-600 rounded text-xs text-gray-300 placeholder-gray-600"
             />
-            <select value={fWin} onChange={(e) => setFWin(e.target.value as TimeWindow)} className="px-2 py-1 bg-gray-900 border border-gray-600 rounded text-xs text-gray-300">
-              {TIME_WINDOWS.map(tw => <option key={tw.key || 'all'} value={tw.key}>{tw.label}</option>)}
-            </select>
             <input value={fOddsMin} onChange={(e) => setFOddsMin(e.target.value)} placeholder="min odds" inputMode="decimal" className="w-20 px-2 py-1 bg-gray-900 border border-gray-600 rounded text-xs text-gray-300 placeholder-gray-600" />
             <input value={fOddsMax} onChange={(e) => setFOddsMax(e.target.value)} placeholder="max odds" inputMode="decimal" className="w-20 px-2 py-1 bg-gray-900 border border-gray-600 rounded text-xs text-gray-300 placeholder-gray-600" />
             <label className="flex items-center gap-1 text-[11px] text-gray-400">
