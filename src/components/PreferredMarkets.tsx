@@ -39,7 +39,9 @@ export default function PreferredMarkets({ onImport }: Props) {
   const win = store.window;
 
   const [leagueFilter, setLeagueFilter] = useState<string>('');
-  const [onlyPreferred, setOnlyPreferred] = useState(true);
+  // Default OFF so the FULL SportyBet catalog (all showcased leagues) shows.
+  // Tick it to narrow to fixtures that carry one of the user's preferred markets.
+  const [onlyPreferred, setOnlyPreferred] = useState(false);
   // Collapsed league groups (by league name). Default: all expanded.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 

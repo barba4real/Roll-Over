@@ -196,10 +196,10 @@ const BASE = 'https://www.sportybet.com';
 /**
  * Fetch one page of upcoming football events, filtered to the given market IDs.
  */
-async function fetchPageFor(region: SportyRegion, marketIds: string, pageNum: number, pageSize: number): Promise<SbTournament[]> {
+async function fetchPageFor(region: SportyRegion, marketIds: string, pageNum: number, pageSize: number, option: number = 1): Promise<SbTournament[]> {
   const url = `${BASE}/api/${region}/factsCenter/pcUpcomingEvents`
     + `?sportId=sr:sport:1&marketId=${marketIds}`
-    + `&pageSize=${pageSize}&pageNum=${pageNum}&option=1`;
+    + `&pageSize=${pageSize}&pageNum=${pageNum}&option=${option}`;
   try {
     const res = await httpGet(url) as SbResponse;
     if (res && res.bizCode === 10000 && res.data?.tournaments) return res.data.tournaments;
@@ -457,39 +457,51 @@ export async function fetchSportyBetFixtures(opts?: {
   const now = new Date();
   const byId = new Map<string, SbFixture>();
 
-  for (let page = 1; page <= maxPages; page++) {
-    onProgress?.(`Loading SportyBet fixtures — page ${page} (${byId.size} so far)…`);
-    const tournaments = await fetchPageFor(region, PREFERRED_IDS_CSV, page, pageSize);
-    if (tournaments.length === 0) break; // feed exhausted — no more showcased fixtures
+  // SportyBet splits its football catalog across several "option" list views:
+  //   option=1 → the ~30 top/mainstream leagues
+  //   option=2/3 → the long tail (e.g. Ukraine Persha Liga, K-League 2,
+  //                friendlies, reserve/women/regional leagues)
+  // Querying only option=1 (as before) silently omitted every long-tail league
+  // the SportyBet site still showcases. We now crawl ALL of these and merge by
+  // eventId so no showcased league is left out.
+  const OPTIONS = [1, 2, 3];
 
-    for (const t of tournaments) {
-      for (const ev of t.events || []) {
-        const kickoff = new Date(ev.estimateStartTime);
-        if (isNaN(kickoff.getTime())) continue;
-        if (!withinWindow(kickoff, win, now)) continue;
-        if (byId.has(ev.eventId)) continue; // one row per event
+  for (const option of OPTIONS) {
+    for (let page = 1; page <= maxPages; page++) {
+      onProgress?.(`Loading SportyBet fixtures — list ${option}, page ${page} (${byId.size} so far)…`);
+      const tournaments = await fetchPageFor(region, PREFERRED_IDS_CSV, page, pageSize, option);
+      if (tournaments.length === 0) break; // this list view exhausted
 
-        const country = ev.sport?.category?.name || '';
-        const leagueName = ev.sport?.category?.tournament?.name || t.name || '';
-        const league = country ? `${country}: ${leagueName}` : leagueName;
+      for (const t of tournaments) {
+        for (const ev of t.events || []) {
+          const kickoff = new Date(ev.estimateStartTime);
+          if (isNaN(kickoff.getTime())) continue;
+          if (!withinWindow(kickoff, win, now)) continue;
+          if (byId.has(ev.eventId)) continue; // one row per event (dedupe across options)
 
-        // Does this event actually carry a preferred market? (returned under the
-        // preferred-id filter, but confirm at least one classifies.)
-        const hasPreferred = (ev.markets || []).some(m => !!classifyPreferred(m));
+          const country = ev.sport?.category?.name || '';
+          const leagueName = ev.sport?.category?.tournament?.name || t.name || '';
+          const league = country ? `${country}: ${leagueName}` : leagueName;
 
-        byId.set(ev.eventId, {
-          eventId: ev.eventId,
-          gameId: ev.gameId || ev.eventId,
-          homeTeam: ev.homeTeamName,
-          awayTeam: ev.awayTeamName,
-          country,
-          leagueName,
-          league,
-          kickoff,
-          date: `${pad2(kickoff.getDate())}/${pad2(kickoff.getMonth() + 1)}`,
-          time: `${pad2(kickoff.getHours())}:${pad2(kickoff.getMinutes())}`,
-          hasPreferred,
-        });
+          // Does this event actually carry a preferred market? (Fixtures come
+          // from the full catalog now; this flag drives the "only my markets"
+          // filter and the fouls-eligibility hint — it no longer gates the list.)
+          const hasPreferred = (ev.markets || []).some(m => !!classifyPreferred(m));
+
+          byId.set(ev.eventId, {
+            eventId: ev.eventId,
+            gameId: ev.gameId || ev.eventId,
+            homeTeam: ev.homeTeamName,
+            awayTeam: ev.awayTeamName,
+            country,
+            leagueName,
+            league,
+            kickoff,
+            date: `${pad2(kickoff.getDate())}/${pad2(kickoff.getMonth() + 1)}`,
+            time: `${pad2(kickoff.getHours())}:${pad2(kickoff.getMinutes())}`,
+            hasPreferred,
+          });
+        }
       }
     }
   }
