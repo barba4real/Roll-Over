@@ -907,3 +907,95 @@ then for each fixture rank the owner's preferred picks (GG, Over lines, 1X2/1UP,
 Either Half, combos) by model probability — optionally checked against live odds in
 `preferred_markets` for value. Fouls is a low-priority bonus, gated by its sparse data, never the
 headline.*
+
+---
+
+## Appendix G — Fixing unresolved team names (data-backed, measured on the real DB)
+
+> Diagnostic run against the live `rollover.db` to explain the high "unresolved / skipped" count
+> on DB-slate predictions and tell you exactly what will move the needle. All numbers below are
+> **real**, not estimates.
+
+### G1 — The measurement
+
+`upcoming_fixtures` has **2,938 distinct team names**; `historical_matches` has **5,314**. Matching
+upcoming → history:
+
+| Resolver stage | Teams resolved | Notes |
+|---|---:|---|
+| Exact string match | 450 / 2,938 (15%) | brittle |
+| Basic normalize (strip `fc/cf/afc/sc/club`) | 836 / 2,938 (28%) | ≈ your current Tier-1 |
+| **Improved normalize** (below) | **1,015 / 2,938 (35%)** | **+179 recovered, cheap** |
+| Still unresolved after improved | 1,923 | see G3 |
+
+**The single biggest cheap win is a better Tier-1 normalizer** — it nearly doubles exact-match and
+recovers +179 over your current normalize, before any fuzzy/alias work.
+
+### G2 — Normalizer improvements (do these first)
+
+The unresolved sample is dominated by **prefix/suffix noise your normalize doesn't strip**. Add:
+
+1. **Leading ordinals** — `"1. FC Magdeburg"`, `"1 FC Kaiserslautern"`, `"1.SK Prostejov"`.
+   Strip a leading `^\s*\d+\s*\.?\s*` before tokenizing. (German/Czech clubs.)
+2. **Many more club-type tokens** — your list is `fc/cf/afc/sc/club`. The DB needs at least:
+   `as, ac, ad, ae, aa, ab, acs, acsm, acd, sk, fk, if, ca, cd, ce, cs, us, usd, rc, sv, tsv,
+   vfl, vfb, fsv, sd, ud, nk, hnk, kf, ks, ss, ssd`. These appear as leading noise on hundreds of
+   Italian/Spanish/Argentine/Nordic/Balkan clubs (`AS Cittadella`, `AD Ceuta`, `CA Banfield`,
+   `Bryne FK`, `ACD Ospitaletto`).
+3. **Strip accents** (unidecode/`unicodedata`): `Alcorcón→Alcorcon`, `Nürnberg→Nurnberg`. SportyBet
+   is usually ASCII; some history sources aren't (and vice-versa).
+
+Just (1)+(2)+(3) recover the +179 measured above and more (the accent cases aren't in that count).
+
+### G3 — What's left is mostly genuinely absent (not a bug)
+
+Of the ~1,923 still unresolved after improved normalize, **the large majority have NO rows in
+`historical_matches` at all** — SportyBet's option 2/3 long-tail crawl (see the app's fixture
+sourcing) surfaces obscure clubs the app never synced history for: `12 de Junio de Villa Hayes`
+(Paraguay), `AA Ponte Preta SP` (Brazil regional), `ACS Axi Adunatii Copaceni` (Romania lower),
+`AD Isidro Metapan` (El Salvador). **These are correctly unresolvable** — there is nothing to
+predict from, and fail-loud is the right behavior. Do **not** chase them; predicting them would
+mean inventing data. This is also consistent with D4: the confident scope is the ~15 clean
+European leagues, and those resolve well.
+
+### G4 — The recoverable remainder (second-pass, optional)
+
+A minority of the still-unresolved ARE real clubs present in history under a different form.
+Patterns worth a second pass, in value order:
+
+1. **Native vs English spelling** — `1. FC Nuremberg` (SportyBet) vs `Nürnberg`/`Nuremberg`
+   (history). → **alias entries** (grow `aliases.json`). This is the highest-value manual add.
+2. **Trailing city / partial** — `AC Omonia Nicosia`, `AE Larissa FC`, `AEK Larnaca` where history
+   stores `Omonia`, `Larissa`, `AEK Larnaca`. → **token-subset match**: if every significant token
+   of the shorter normalized name appears in a candidate, accept (guarded by league scope, G5).
+3. **Accents** — covered by G2.3.
+
+### G5 — League scoping needs the slug (cross-side note)
+
+Your D4 strategy — restrict fuzzy candidates by `league_id` before matching — is the biggest
+*accuracy* (not coverage) win, because it prevents wrong matches among the 5,314 names. But
+`upcoming_fixtures.league` is SportyBet's display string (`"France: Ligue 1"`), not the DB slug
+(`fra-ligue-1`). Two ways to bridge:
+
+- **Predictor-side (now):** keep a small `league_map.json` (Appendix E3) mapping the ~15 clean
+  SportyBet strings → slugs; scope candidates when a fixture's league maps.
+- **App-side (offered):** the Roll-Over app can stamp the resolved `league_id` directly onto
+  `upcoming_fixtures` so you get the slug for free. **This is available on request** — if the owner
+  approves it, a `league_id` column appears on `upcoming_fixtures` and you scope on it directly
+  with no mapping file. Flag it if G5 becomes your accuracy bottleneck.
+
+### G6 — Recommended order for the architect
+
+1. **G2 normalizer upgrade** (ordinals + expanded club tokens + accents) — biggest cheap win, do
+   first. Re-measure the resolved count.
+2. **Grow `aliases.json`** from the native/English spelling misses (G4.1) — use `--resolve-only`
+   (Appendix C.1) against a DB-slate run to dump the real misses and triage them.
+3. **Token-subset match** (G4.2), guarded by league scope.
+4. **League scoping** (G5) — ask the owner for the app-side `league_id` column if the hand-mapped
+   `league_map.json` proves too noisy.
+5. **Accept the long-tail floor** (G3): a large unresolved count is expected and correct when the
+   DB simply has no history for those clubs. Report it; don't force it.
+
+**Bottom line:** the "unresolved" count is partly a fixable normalizer gap (G2, +179 measured and
+more) and partly the honest, correct floor of clubs with no history (G3). Fix the normalizer and
+grow aliases against real misses; don't try to resolve clubs that aren't in the data.
