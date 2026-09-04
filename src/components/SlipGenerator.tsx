@@ -65,6 +65,7 @@ export default function SlipGenerator({ selections, onGenerated, scores }: Props
       maxPicksPerSlip: d.autoMaxPicks,
       noSameTeam: true,
       noSameKickoff: false,
+      sameKickoffToleranceMin: 0,
       spreadAcrossDates: false,
       maxPicksPerDay: 0,
       maxRepeatAcrossSlips: 1,
@@ -460,7 +461,23 @@ export default function SlipGenerator({ selections, onGenerated, scores }: Props
               className="rounded"
             />
             No same kick-off time in slip
+            {config.noSameKickoff && (
+              <select
+                value={config.sameKickoffToleranceMin ?? 0}
+                onChange={(e) => setConfig({ ...config, sameKickoffToleranceMin: parseInt(e.target.value) })}
+                onClick={(e) => e.stopPropagation()}
+                className="ml-1 px-1 py-0.5 bg-gray-900 border border-gray-600 rounded text-[10px] text-gray-300"
+                title="How close counts as 'same' kickoff"
+              >
+                <option value={0}>exact time</option>
+                <option value={15}>within 15 min</option>
+                <option value={30}>within 30 min</option>
+              </select>
+            )}
           </label>
+          <p className="text-[10px] text-gray-500 ml-6 -mt-0.5">
+            Off by default — the roll-over combines same/near-kickoff games. Tick to separate them.
+          </p>
           <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer py-0.5">
             <input
               type="checkbox"

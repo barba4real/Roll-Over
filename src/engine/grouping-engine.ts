@@ -33,6 +33,7 @@ export const DEFAULT_CONFIG: GroupingConfig = {
   noSameKickoff: false, // Default OFF — games that kick off together SHOULD be
                         // combinable (the roll-over-by-wave model). Override to ON
                         // if you want staggered results.
+  sameKickoffToleranceMin: 0, // when noSameKickoff is ON: 0=exact, 15/30=within N min
   spreadAcrossDates: false,
   maxPicksPerDay: 0,
   maxRepeatAcrossSlips: 1,
@@ -191,11 +192,15 @@ function hasConflict(a: ParsedSelection, b: ParsedSelection, config: GroupingCon
     if (aHome === bHome || aHome === bAway || aAway === bHome || aAway === bAway) return true;
   }
 
-  // "No same kick-off time in slip" — when ON, two picks kicking off at the exact
-  // same moment can't share a slip (track them sequentially, no blind legs).
-  // When OFF, same-kickoff picks ARE allowed to combine.
+  // "No same kick-off time in slip" — USER-CONTROLLED (off by default). When ON,
+  // two picks kicking off within the tolerance window can't share a slip. The
+  // tolerance (minutes; 0 = exact same moment) lets it mean "within 15/30 min",
+  // not just the exact millisecond. When OFF, same/near-kickoff picks combine
+  // freely — the roll-over default. (The ONLY always-on blocker is same-fixture.)
   if (config.noSameKickoff) {
-    if (a.kickOffDateTime.getTime() === b.kickOffDateTime.getTime()) return true;
+    const tolMs = Math.max(0, config.sameKickoffToleranceMin ?? 0) * 60_000;
+    const diff = Math.abs(a.kickOffDateTime.getTime() - b.kickOffDateTime.getTime());
+    if (diff <= tolMs) return true;
   }
 
   return false;

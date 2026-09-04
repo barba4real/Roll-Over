@@ -76,7 +76,8 @@ export interface GroupingConfig {
   safeOddsRange: { min: number; max: number }; // Picks within this range are "safe zone"
   maxHighRiskPerSlip: number;
   noSameTeam: boolean;
-  noSameKickoff: boolean; // When true, two picks with identical kickoff can't share a slip
+  noSameKickoff: boolean; // When true, two picks kicking off within the tolerance window can't share a slip
+  sameKickoffToleranceMin?: number; // minutes; 0 = exact same time only, e.g. 15/30 = within N min
   spreadAcrossDates: boolean;
   maxPicksPerDay: number; // 0 = no limit
   maxRepeatAcrossSlips: number; // Legacy manual cap. When coverageMode is on, this is ignored.
