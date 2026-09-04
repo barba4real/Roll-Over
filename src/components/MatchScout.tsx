@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { ScoutedMatch, PickSuggestion, scoutMatches } from '../engine/match-scout';
+import { ScoutedMatch, PickSuggestion } from '../engine/match-scout';
+import { TimeWindow, TIME_WINDOWS, fetchSportyBetFixtures } from '../engine/sportybet';
 import { setFootballDataKey } from '../engine/football-data-org';
 import { setSportmonksToken } from '../engine/sportmonks';
 import { ParsedSelection } from '../engine/types';
@@ -16,7 +17,6 @@ import {
   getAllRegions,
   getLeagues,
   getPresetLeagues,
-  getFootballDataCodes,
   getProviderCount,
 } from '../engine/league-registry';
 
@@ -106,7 +106,7 @@ export default function MatchScout({ onAddPick }: Props) {
   });
   const [loading, setLoading] = useState(() => scoutRunning);
   const [error, setError] = useState<string | null>(() => persistedScoutError);
-  const [days, setDays] = useState(2);
+  const [win, setWin] = useState<TimeWindow>('');
   const [expandedMatch, setExpandedMatch] = useState<number | null>(null);
   const [addedPicks, setAddedPicks] = useState<Set<string>>(new Set());
   const [valueMap, setValueMap] = useState<Record<string, { isValue: boolean; edge: number; marketOdds: number }>>({});
@@ -317,159 +317,58 @@ export default function MatchScout({ onAddPick }: Props) {
     try {
       let results: ScoutedMatch[] = [];
 
-      // Get ESPN slugs for selected leagues — pass directly so ESPN fetches the right ones
-      const selectedEspnSlugs = LEAGUE_REGISTRY
-        .filter(l => leagueSelection[l.id] && l.espnSlug)
-        .map(l => l.espnSlug!);
-
-      // Get Football-Data.org codes for selected leagues
-      const footballDataCodes = getFootballDataCodes(selectedLeagueIds);
-
-      // Fetch from ESPN directly with the user's selected leagues
-      const { getAllScheduledFixtures: fetchEspnSchedule } = await import('../engine/espn');
-      const { getAllUpcomingEvents: fetchSportsDb, SPORTSDB_LEAGUES } = await import('../engine/thesportsdb');
-
-      // Cap days for performance (max 14)
-      const fetchDays = Math.min(days, 14);
-
-      // Fetch from multiple sources in parallel
-      const [espnResult, sportsDbResult, fdResult, flashscoreResult] = await Promise.allSettled([
-        // ESPN: use schedule endpoint (returns ALL fixtures, not just 1/day)
-        providerToggles.espn && selectedEspnSlugs.length > 0
-          ? fetchEspnSchedule(selectedEspnSlugs)
-          : Promise.resolve([]),
-        // TheSportsDB: fetch its configured leagues
-        providerToggles.thesportsdb
-          ? fetchSportsDb(undefined)
-          : Promise.resolve([]),
-        // Football-Data.org: fetch if key available
-        providerToggles.footballdata && localStorage.getItem('rollover_footballdata_key') && footballDataCodes.length > 0
-          ? (async () => {
-              const { getAllUpcomingMatches } = await import('../engine/football-data-org');
-              return getAllUpcomingMatches(fetchDays, footballDataCodes);
-            })()
-          : Promise.resolve([]),
-        // Flashscore: massive fixture discovery (365 leagues)
-        (async () => {
-          const { fetchMultipleDays } = await import('../engine/flashscore');
-          return fetchMultipleDays(Math.min(fetchDays, 7)); // Max 7 days for speed
-        })(),
-      ]);
+      // ─── FIXTURES: SportyBet is the spine ─────────────────────────────────
+      // Every scouted fixture comes from SportyBet — the book we actually play.
+      // Historical DB (predictMatch) + Flashscore matchId caching remain as
+      // ENRICHMENT feeders only, layered onto the SportyBet fixture list.
+      const sbResult = await fetchSportyBetFixtures({
+        region: 'ng', maxPages: 12, pageSize: 30, window: win,
+        onProgress: (m) => setSyncMessage(m),
+      });
+      setSyncMessage(null);
 
       if (signal.aborted) return;
 
-      // Merge all fixture results into one unified list
-      type RawFixture = { homeTeam: string; awayTeam: string; kickOff: string; league: string; leagueSlug: string; source: string };
-      const allFixtures: RawFixture[] = [];
-
-      // ESPN results
-      if (espnResult.status === 'fulfilled' && espnResult.value.length > 0) {
-        for (const e of espnResult.value as any[]) {
-          allFixtures.push({ homeTeam: e.homeTeam || '', awayTeam: e.awayTeam || '', kickOff: e.kickOff || '', league: e.leagueName || '', leagueSlug: e.leagueSlug || '', source: 'ESPN' });
-        }
-      }
-
-      // TheSportsDB results
-      if (sportsDbResult.status === 'fulfilled' && (sportsDbResult.value as any[]).length > 0) {
-        for (const e of sportsDbResult.value as any[]) {
-          allFixtures.push({ homeTeam: e.strHomeTeam || e.homeTeam || '', awayTeam: e.strAwayTeam || e.awayTeam || '', kickOff: e.strTimestamp || e.dateEvent || '', league: e.leagueName || e.strLeague || '', leagueSlug: '', source: 'SDB' });
-        }
-      }
-
-      // Football-Data.org results
-      if (fdResult.status === 'fulfilled' && (fdResult.value as any[]).length > 0) {
-        for (const m of fdResult.value as any[]) {
-          allFixtures.push({ homeTeam: m.homeTeam?.name || m.homeTeam?.shortName || '', awayTeam: m.awayTeam?.name || m.awayTeam?.shortName || '', kickOff: m.utcDate || '', league: m.competitionName || m.competition?.name || '', leagueSlug: m.competitionCode || '', source: 'FD' });
-        }
-      }
-
-      // Flashscore results (365 leagues — massive coverage)
-      if (flashscoreResult.status === 'fulfilled' && (flashscoreResult.value as any[]).length > 0) {
-        // Store match IDs for Analysis to use later
-        const fsMatchIds: Record<string, string> = {};
-        for (const f of flashscoreResult.value as any[]) {
-          if (f.isFinished) continue; // Only upcoming fixtures
-          const kickOff = f.date && f.time ? `${f.date}T${f.time}:00` : f.date || '';
-          allFixtures.push({ homeTeam: f.homeTeam || '', awayTeam: f.awayTeam || '', kickOff, league: `${f.country}: ${f.league}` || '', leagueSlug: '', source: 'FS' });
-          // Cache matchId keyed by team names (for Analysis H2H lookup)
-          if (f.matchId && f.homeTeam && f.awayTeam) {
-            fsMatchIds[`${f.homeTeam.toLowerCase()}|${f.awayTeam.toLowerCase()}`] = f.matchId;
-          }
-        }
-        // Store in sessionStorage for Analysis to access
-        try { sessionStorage.setItem('rollover_fs_matchids', JSON.stringify(fsMatchIds)); } catch {}
-      }
-
-      // Deduplicate, merge providers, and filter by selected leagues + date range
-      const now = new Date();
-      const maxDate = new Date(now.getTime() + fetchDays * 24 * 60 * 60 * 1000);
-
-      // Build league name match list from selected leagues
+      // Optional league narrowing: if the user has selected specific leagues in
+      // the picker, keep only SportyBet fixtures whose league name matches. If
+      // nothing usable matches, fall back to showing all SportyBet fixtures so
+      // the scout is never empty just because registry names differ from Sporty.
       const selectedLeagueNames = LEAGUE_REGISTRY
         .filter(l => leagueSelection[l.id])
         .map(l => l.name.toLowerCase());
 
-      // Import team alias resolver for smart dedup
-      const { normalizeTeamForDedup, resolveTeamName } = await import('../engine/team-aliases');
-
-      // Merge: group fixtures by resolved team names + date
-      type MergedFixture = { homeTeam: string; awayTeam: string; kickOff: string; league: string; leagueSlug: string; sources: string[] };
-      const mergedMap = new Map<string, MergedFixture>();
-
-      for (const f of allFixtures) {
-        if (!f.homeTeam || !f.awayTeam) continue;
-
-        // Date filter
-        if (f.kickOff) {
-          const kickOffDate = new Date(f.kickOff);
-          if (!isNaN(kickOffDate.getTime())) {
-            const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-            if (kickOffDate < startOfToday || kickOffDate > maxDate) continue;
-          }
-        }
-
-        // League filter
-        const fLeague = (f.league || '').toLowerCase().trim();
-        const matchesLeague = selectedLeagueNames.some(name => {
+      const leagueMatches = (leagueName: string) => {
+        if (selectedLeagueNames.length === 0) return true;
+        const fLeague = (leagueName || '').toLowerCase().trim();
+        return selectedLeagueNames.some(name => {
           if (fLeague === name) return true;
           if (fLeague.length > 3 && name.length > 3) {
-            if (fLeague.includes(name) && fLeague.length - name.length <= 5) return true;
-            if (name.includes(fLeague) && name.length - fLeague.length <= 5) return true;
+            if (fLeague.includes(name) && fLeague.length - name.length <= 6) return true;
+            if (name.includes(fLeague) && name.length - fLeague.length <= 6) return true;
           }
           return false;
         });
-        const matchesSlug = f.leagueSlug && selectedEspnSlugs.includes(f.leagueSlug);
-        if (!matchesLeague && !matchesSlug) continue;
+      };
 
-        // Resolve team names through alias database
-        const canonicalHome = normalizeTeamForDedup(f.homeTeam);
-        const canonicalAway = normalizeTeamForDedup(f.awayTeam);
-        const dateKey = f.kickOff?.split('T')[0] || '';
-        const key = `${canonicalHome}|${canonicalAway}|${dateKey}`;
+      // Team alias resolver for consistent display / DB lookups
+      const { resolveTeamName } = await import('../engine/team-aliases');
 
-        if (mergedMap.has(key)) {
-          // Merge: add source to existing entry
-          const existing = mergedMap.get(key)!;
-          if (!existing.sources.includes(f.source)) {
-            existing.sources.push(f.source);
-          }
-        } else {
-          // New fixture — use the resolved canonical name for display
-          mergedMap.set(key, {
-            homeTeam: resolveTeamName(f.homeTeam),
-            awayTeam: resolveTeamName(f.awayTeam),
-            kickOff: f.kickOff,
-            league: f.league,
-            leagueSlug: f.leagueSlug,
-            sources: [f.source],
-          });
-        }
-      }
+      type MergedFixture = { homeTeam: string; awayTeam: string; kickOff: string; league: string; leagueSlug: string; sources: string[] };
 
-      const uniqueFixtures = Array.from(mergedMap.values());
+      const filtered = sbResult.fixtures.filter(f => leagueMatches(f.leagueName || f.league));
+      const source = filtered.length > 0 ? filtered : sbResult.fixtures;
+
+      const uniqueFixtures: MergedFixture[] = source.map(f => ({
+        homeTeam: resolveTeamName(f.homeTeam),
+        awayTeam: resolveTeamName(f.awayTeam),
+        kickOff: f.kickoff instanceof Date ? f.kickoff.toISOString() : String(f.kickoff || ''),
+        league: f.leagueName || f.league || '',
+        leagueSlug: '',
+        sources: ['SportyBet'],
+      }));
 
       if (uniqueFixtures.length === 0) {
-        setError('No fixtures found for selected leagues. Try selecting more leagues or a longer time range.');
+        setError('No SportyBet fixtures found for this window. Try a wider time window.');
         setLoading(false);
         scoutRunning = false;
         return;
@@ -560,11 +459,6 @@ export default function MatchScout({ onAddPick }: Props) {
             persistedScoutResults = results;
           }
         }
-
-      // Fallback: Football-Data.org scout if orchestrator got nothing
-      if (results.length === 0 && localStorage.getItem('rollover_footballdata_key') && footballDataCodes.length > 0) {
-        results = await scoutMatches(days, footballDataCodes);
-      }
 
       setMatches(results);
       persistedScoutResults = results;
@@ -714,16 +608,12 @@ export default function MatchScout({ onAddPick }: Props) {
         </div>
         <div className="flex items-center gap-2">
           <select
-            value={days}
-            onChange={(e) => setDays(parseInt(e.target.value))}
+            value={win}
+            onChange={(e) => setWin(e.target.value as TimeWindow)}
             className="px-2 py-1 bg-gray-800 border border-gray-600 rounded text-xs focus:outline-none"
+            title="SportyBet fixture window"
           >
-            <option value={1}>Today</option>
-            <option value={2}>2 days</option>
-            <option value={3}>3 days</option>
-            <option value={5}>5 days</option>
-            <option value={7}>7 days</option>
-            <option value={14}>2 weeks</option>
+            {TIME_WINDOWS.map(tw => <option key={tw.key || 'all'} value={tw.key}>{tw.label}</option>)}
           </select>
           <button
             onClick={handleScout}
@@ -990,7 +880,7 @@ export default function MatchScout({ onAddPick }: Props) {
       {loading && (
         <div className="text-center py-6">
           <p className="text-sm text-gray-400 animate-pulse">Analyzing fixtures...</p>
-          <p className="text-xs text-gray-500 mt-1">Scanning {selectedCount} leagues, {days} day(s)</p>
+          <p className="text-xs text-gray-500 mt-1">SportyBet fixtures · {TIME_WINDOWS.find(t => t.key === win)?.label || 'All upcoming'}</p>
         </div>
       )}
 

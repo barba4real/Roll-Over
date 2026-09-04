@@ -1,16 +1,18 @@
 /**
- * FoulsStrategy — Dedicated page for Team Fouls Over/Under analysis.
- * 
- * Fetches foul statistics from Flashscore for upcoming fixtures.
+ * FoulsStrategy — Team Fouls Over/Under analysis.
+ *
+ * FIXTURES come from SportyBet (the book we play) — specifically the fixtures
+ * that OFFER a fouls market, so every suggestion is actually bettable. FOUL
+ * HISTORY / stats come from Flashscore (and any future crawl/API source) as an
+ * enrichment feeder — used only to compute team foul averages + hit rates.
+ *
  * Shows: team foul averages, under/over hit rates, best picks, risk flags.
- * Data source: Flashscore stats pages exclusively.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { fetchDayFixtures, FlashscoreFixture } from '../engine/flashscore';
-import { fetchMatchEnrichment, EnrichedMatchData, getCachedEnrichment } from '../engine/match-enrichment';
-import { httpGetText } from '../lib/http';
-import { isSameTeam } from '../engine/team-aliases';
+import { fetchMatchEnrichment, getCachedEnrichment } from '../engine/match-enrichment';
+import { fetchSportyBetFixtures, TimeWindow, TIME_WINDOWS } from '../engine/sportybet';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -49,25 +51,38 @@ export default function FoulsStrategy() {
   const [fixtures, setFixtures] = useState<FlashscoreFixture[]>([]);
   const [suggestions, setSuggestions] = useState<FoulsPickSuggestion[]>([]);
   const [teamProfiles, setTeamProfiles] = useState<Map<string, TeamFoulsProfile>>(new Map());
-  const [daysToScan, setDaysToScan] = useState(2);
+  const [win, setWin] = useState<TimeWindow>('');
   const [targetLine, setTargetLine] = useState(13.5);
 
   async function scanForPicks() {
     setLoading(true);
     setSuggestions([]);
     setTeamProfiles(new Map());
-    setStatus('Fetching upcoming fixtures...');
+    setStatus('Loading SportyBet fixtures that offer fouls…');
 
     try {
-      // Step 1: Get upcoming fixtures from Flashscore
-      const allFixtures: FlashscoreFixture[] = [];
-      for (let d = 0; d < daysToScan; d++) {
-        const dayFixtures = await fetchDayFixtures(d);
-        const upcoming = dayFixtures.filter(f => !f.isFinished);
-        allFixtures.push(...upcoming);
-      }
+      // Step 1: FIXTURES from SportyBet — only games that offer a fouls market,
+      // so every pick we suggest is actually bettable on the book we play.
+      const { fixtures: sbFixtures } = await fetchSportyBetFixtures({
+        region: 'ng', maxPages: 10, pageSize: 30, window: win,
+        onProgress: (m) => setStatus(m),
+      });
+      // Map to the FlashscoreFixture shape the downstream analysis expects.
+      const allFixtures: FlashscoreFixture[] = sbFixtures
+        .filter(f => f.hasPreferred) // offers at least one preferred market (incl. fouls)
+        .map(f => ({
+          matchId: f.eventId,
+          homeTeam: f.homeTeam,
+          awayTeam: f.awayTeam,
+          time: f.time,
+          country: f.country,
+          league: f.leagueName,
+          score: null,
+          isFinished: false,
+          date: f.date,
+        }));
       setFixtures(allFixtures);
-      setStatus(`Found ${allFixtures.length} upcoming fixtures. Fetching foul history...`);
+      setStatus(`Found ${allFixtures.length} SportyBet fixture(s). Fetching foul history from Flashscore…`);
 
       // Step 2: For each team, fetch their recent match stats to get foul averages
       // We look at the last 5-7 finished matches per team
@@ -227,16 +242,13 @@ export default function FoulsStrategy() {
       {/* Controls */}
       <div className="flex items-center gap-4 mb-4 p-3 bg-gray-800 rounded-lg border border-gray-700">
         <div className="flex items-center gap-2">
-          <span className="text-xs text-gray-400">Days ahead:</span>
+          <span className="text-xs text-gray-400">Window:</span>
           <select
-            value={daysToScan}
-            onChange={(e) => setDaysToScan(parseInt(e.target.value))}
+            value={win}
+            onChange={(e) => setWin(e.target.value as TimeWindow)}
             className="px-2 py-1 bg-gray-900 border border-gray-600 rounded text-xs text-gray-300"
           >
-            <option value="1">1</option>
-            <option value="2">2</option>
-            <option value="3">3</option>
-            <option value="5">5</option>
+            {TIME_WINDOWS.map(tw => <option key={tw.key || 'all'} value={tw.key}>{tw.label}</option>)}
           </select>
         </div>
         <div className="flex items-center gap-2">
@@ -364,8 +376,8 @@ export default function FoulsStrategy() {
 
       {!loading && suggestions.length === 0 && teamProfiles.size === 0 && (
         <div className="text-center py-12 text-gray-500">
-          <p className="text-sm">Click "Scan for Fouls Picks" to analyze upcoming fixtures</p>
-          <p className="text-xs mt-1">Fetches foul data from Flashscore for the next {daysToScan} day(s)</p>
+          <p className="text-sm">Click "Scan for Fouls Picks" to analyze SportyBet fixtures that offer fouls</p>
+          <p className="text-xs mt-1">Fixtures from SportyBet · foul history from Flashscore</p>
         </div>
       )}
     </div>
