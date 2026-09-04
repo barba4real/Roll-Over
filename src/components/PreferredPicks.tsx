@@ -23,6 +23,7 @@ import {
   TimeWindow,
   TIME_WINDOWS,
 } from '../engine/sportybet';
+import { savePreferredMarkets } from '../engine/preferred-markets-store';
 
 const SECTION_ORDER: PreferredSection[] = ['Early-Payout', 'Combos', 'Halves', 'Corners', 'Team Totals', 'Other'];
 
@@ -105,6 +106,9 @@ export default function PreferredPicks({ onImport }: Props) {
       setScannedAt(now);
       persistedFixtures = confirmed; persistedScannedAt = now;
       saveCache(confirmed, now);
+      // Persist confirmed markets + live odds to SQLite for the Python predictor
+      // (value comparison — read-only on its side).
+      void savePreferredMarkets(confirmed, sectionForKey);
       setStatus(`${confirmed.length} fixture(s) offer your preferred markets.`);
     } catch (e: any) {
       setStatus(`Scan failed: ${e?.message || 'unknown error'}`);

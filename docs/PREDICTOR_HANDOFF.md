@@ -454,8 +454,9 @@ docs/predictor-aliases-seed.json
 ### D4 — League priority (scoped from real DB ground truth)
 
 > **Offline boundary (read this first).** The Python predictor is **fully offline**. Its only
-> inputs are (1) the **read-only** `rollover.db` — both the `historical_matches` learning data and
-> the `upcoming_fixtures` slate (§4A) — and (2) **fixtures the user pastes** (§4B). It does **not**
+> inputs are (1) the **read-only** `rollover.db` — the `historical_matches` learning data, the
+> `upcoming_fixtures` slate (§4A), and optionally the `preferred_markets` odds table (Appendix
+> D-odds, value-comparison only) — and (2) **fixtures the user pastes** (§4B). It does **not**
 > connect to SportyBet, scan any catalog, check live market availability, or make any network call.
 > All references to SportyBet below explain *why the database looks the way it does* — they are
 > **not** steps the predictor performs. (Reading `upcoming_fixtures` is just a local table read; it
@@ -642,6 +643,58 @@ point). Halves markets need a half-time goals model (you have `ht_home_goals`/`h
 **Bottom line:** keep building fouls + goals as specified. The preferred-market list is context so
 you interpret `has_preferred` correctly and know where optional presentation labels or future
 models could hook in — it adds **no** v1 obligation.
+
+### D-odds — `preferred_markets` table (confirmed markets + live odds; OPTIONAL, value-only)
+
+The app now also writes a **`preferred_markets`** table to `rollover.db` — the confirmed preferred
+markets **with their live SportyBet lines/odds**, captured when the owner scans the Preferred tab.
+You can read it read-only like every other table.
+
+**Schema (`preferred_markets`):** one row per `(event_id, market_key, line)`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `event_id` | TEXT | SportyBet event id (joins to `upcoming_fixtures.event_id`) |
+| `home_team` / `away_team` | TEXT | SportyBet spellings (§5 resolver applies) |
+| `league` | TEXT | `Country: League` |
+| `kickoff_ms` | INTEGER | epoch ms |
+| `section` | TEXT | Early-Payout / Combos / Halves / Corners / Team Totals / Other |
+| `market_key` | TEXT | stable key (e.g. `1x2_1up`, `dc_ou`, `home_corners`) |
+| `market_label` | TEXT | display label (team-agnostic) |
+| `line` | TEXT | the specific outcome, e.g. `Over 2.5`, `Home or Over 2.5` |
+| `odds` | REAL | live decimal odds (nullable if unpriced) |
+| `locked` | INTEGER | `1` if the line was not open/priced when confirmed |
+| `confirmed_at` | INTEGER | epoch ms the row was captured |
+
+Primary key `(event_id, market_key, line)`; indexed on `event_id` and `kickoff_ms`; rows are
+pruned ~2 days past kickoff. It's populated only when the owner runs a Preferred-tab scan, so it
+may be empty/partial — handle absence gracefully, same as the other optional tables.
+
+**Critical — what this is and is NOT for the predictor:**
+
+- **NOT a modeling input.** Do **not** feed these odds into the fouls/goals models. The models
+  learn from *history* (`historical_matches`) and get fixtures from `upcoming_fixtures`. Feeding
+  SportyBet's own prices into a model whose job is to find value *against* those prices would be
+  circular and self-defeating. This stays true to the offline, history-based design.
+- **It IS the odds side of an OPTIONAL value check.** The one legitimate use: compare **your
+  model's probability** for an outcome against **SportyBet's implied probability** (`1 / odds`)
+  to flag *value* — i.e. where your model thinks an outcome is more likely than the price implies.
+  This is a **stretch/future** feature, not v1. If pursued: join `preferred_markets` to your
+  per-market model output on `event_id` + market, compute `edge = model_prob - (1/odds)`, and
+  surface positive-edge lines. Read-only always; never write to this table.
+
+Read snippet (only if/when you build value comparison):
+
+```python
+rows = con.execute("""
+    SELECT event_id, home_team, away_team, league, section,
+           market_key, market_label, line, odds, locked, kickoff_ms
+    FROM preferred_markets
+    WHERE (kickoff_ms IS NULL OR kickoff_ms >= ?) AND locked = 0 AND odds IS NOT NULL
+    ORDER BY kickoff_ms
+""", [int(time.time() * 1000)]).fetchall()
+# implied_prob = 1 / odds ; value = your_model_prob - implied_prob
+```
 
 ---
 
