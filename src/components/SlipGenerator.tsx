@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ParsedSelection, Slip, GroupingConfig } from '../engine/types';
-import { generateSlipsAsync, DEFAULT_CONFIG, countPastFixtures, coverageReport, getEligible } from '../engine/grouping-engine';
+import { generateSlipsAsync, generateSlipsByWave, DEFAULT_CONFIG, countPastFixtures, coverageReport, getEligible } from '../engine/grouping-engine';
 
 /**
  * Build a kickoff window (ISO datetime-local strings) for a named tier, based on
@@ -64,7 +64,7 @@ export default function SlipGenerator({ selections, onGenerated, scores }: Props
       minPicksPerSlip: d.autoMinPicks,
       maxPicksPerSlip: d.autoMaxPicks,
       noSameTeam: true,
-      noSameKickoff: true,
+      noSameKickoff: false,
       spreadAcrossDates: false,
       maxPicksPerDay: 0,
       maxRepeatAcrossSlips: 1,
@@ -109,6 +109,26 @@ export default function SlipGenerator({ selections, onGenerated, scores }: Props
 
     if (slips.length === 0) {
       setWarning('No slips could be generated with these settings. Try more picks, a wider safe-odds range, or a different target.');
+    }
+  }
+
+  // Auto-grouped wave generation: split the pool into kickoff waves (Next 3h / 6h
+  // / 12h / Today / Tomorrow) and build slips WITHIN each wave — only fixtures
+  // that play together combine. One action across all waves.
+  async function handleGenerateByWave() {
+    setGenerating(true);
+    setWarning(null);
+    setProgress(0);
+    const cfg = { ...config, maxPicksPerSlip: Math.min(12, config.maxPicksPerSlip) };
+    const slips = await generateSlipsByWave(selections, cfg, (found) => setProgress(found), scores);
+    setResultCount(slips.length);
+    const elig = getEligible(selections, cfg);
+    const rep = coverageReport(elig, slips);
+    setCoverage({ total: rep.totalFixtures, used: rep.usedFixtures, unused: rep.unused.length, maxRepeat: rep.maxRepeat });
+    onGenerated(slips);
+    setGenerating(false);
+    if (slips.length === 0) {
+      setWarning('No wave slips could be generated. A wave needs at least the minimum picks to form a slip.');
     }
   }
 
@@ -583,6 +603,16 @@ export default function SlipGenerator({ selections, onGenerated, scores }: Props
             const available = selections.length - (config.futureOnly ? pastCount : 0);
             return generating ? `Generating... (${progress} found)` : `Generate Slips (${available} future picks available)`;
           })()}
+        </button>
+
+        {/* Generate PER WAVE — slips only combine fixtures that play together */}
+        <button
+          onClick={handleGenerateByWave}
+          disabled={selections.length < config.minPicksPerSlip || generating}
+          className="w-full py-2 mt-2 bg-blue-700 hover:bg-blue-600 disabled:bg-gray-600 disabled:cursor-not-allowed rounded font-medium text-xs"
+          title="Split the pool into kickoff waves (Next 3h / 6h / 12h / Today / Tomorrow) and build slips within each — only fixtures that play together are combined."
+        >
+          {generating ? 'Generating…' : '⧗ Generate per kickoff wave'}
         </button>
 
         {resultCount !== null && (

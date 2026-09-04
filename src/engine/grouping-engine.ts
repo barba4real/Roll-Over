@@ -30,7 +30,9 @@ export const DEFAULT_CONFIG: GroupingConfig = {
   safeOddsRange: { min: 1.20, max: 1.60 },
   maxHighRiskPerSlip: 1,
   noSameTeam: true,
-  noSameKickoff: true, // Default ON — no two same-kickoff picks in one slip
+  noSameKickoff: false, // Default OFF — games that kick off together SHOULD be
+                        // combinable (the roll-over-by-wave model). Override to ON
+                        // if you want staggered results.
   spreadAcrossDates: false,
   maxPicksPerDay: 0,
   maxRepeatAcrossSlips: 1,
@@ -550,14 +552,14 @@ function packIntoSlips(
   const targetMax = config.oddsRange.max;
   const target = config.targetOdds;
 
-  // Deduplicate to one pick per fixture (coverage counts fixtures, not picks).
-  const byFixture = new Map<string, ParsedSelection>();
-  for (const s of eligible) {
-    const k = fixtureKey(s);
-    if (!byFixture.has(k)) byFixture.set(k, s);
-  }
-  const picks = Array.from(byFixture.values());
-  if (picks.length < config.minPicksPerSlip) return [];
+  // Use ALL picks (not one-per-fixture). A fixture's alternate picks (e.g. Lyon
+  // Over 1.5 AND Lyon GG) are allowed to land in DIFFERENT slips — the same
+  // fixture just never appears twice WITHIN one slip (hasConflict HARD RULE).
+  // Coverage still spreads by fixture so one fixture's loss kills as few slips as
+  // possible per pass.
+  const picks = [...eligible];
+  const distinctFixtures = new Set(picks.map(fixtureKey)).size;
+  if (distinctFixtures < config.minPicksPerSlip) return [];
 
   // Sort ascending by odds so dealing alternates strong and weak picks.
   const sorted = [...picks].sort((a, b) => a.odds - b.odds);
@@ -692,6 +694,79 @@ function packIntoSlips(
 
   for (let i = 0; i < slips.length; i++) onProgress?.(i + 1);
   return slips;
+}
+
+// ─── Kickoff waves (roll-over-by-wave) ───────────────────────────────────────
+
+export type KickoffWave = 'next3h' | 'next6h' | 'next12h' | 'today' | 'tomorrow' | 'later';
+
+export const WAVE_ORDER: KickoffWave[] = ['next3h', 'next6h', 'next12h', 'today', 'tomorrow', 'later'];
+export const WAVE_LABEL: Record<KickoffWave, string> = {
+  next3h: 'Next 3 hours',
+  next6h: 'Next 6 hours',
+  next12h: 'Next 12 hours',
+  today: 'Today',
+  tomorrow: 'Tomorrow',
+  later: 'Later',
+};
+
+/**
+ * Classify a fixture into a kickoff wave relative to `now`. Waves are nested
+ * (a game in the next 3h is also "today"), so classification picks the SMALLEST
+ * wave that contains it — the most imminent bucket — which is what "what plays
+ * together next" means. Games already started fall to their day bucket (they'll
+ * be dropped by futureOnly anyway).
+ */
+export function kickoffWave(kickoff: Date, now: Date = new Date()): KickoffWave {
+  const t = kickoff.getTime();
+  const n = now.getTime();
+  const h = (n2: number) => n + n2 * 3600_000;
+  const endToday = new Date(now); endToday.setHours(23, 59, 59, 999);
+  const startTomorrow = new Date(now); startTomorrow.setDate(startTomorrow.getDate() + 1); startTomorrow.setHours(0, 0, 0, 0);
+  const endTomorrow = new Date(startTomorrow); endTomorrow.setHours(23, 59, 59, 999);
+
+  if (t > n && t <= h(3)) return 'next3h';
+  if (t > n && t <= h(6)) return 'next6h';
+  if (t > n && t <= h(12)) return 'next12h';
+  if (t <= endToday.getTime()) return 'today';
+  if (t >= startTomorrow.getTime() && t <= endTomorrow.getTime()) return 'tomorrow';
+  return 'later';
+}
+
+/**
+ * Auto-grouped wave generation: split the eligible pool into kickoff waves and
+ * build slips WITHIN each wave (only fixtures that play together combine), in one
+ * pass. Returns slips across all waves, ordered by wave (soonest first). Each
+ * slip's picks all belong to the same wave.
+ */
+export async function generateSlipsByWave(
+  selections: ParsedSelection[],
+  config: GroupingConfig = DEFAULT_CONFIG,
+  onProgress?: (found: number) => void,
+  scores?: Map<string, number>,
+): Promise<Slip[]> {
+  const now = new Date();
+  const eligible = getEligible(selections, config);
+  // Bucket eligible picks by wave.
+  const byWave = new Map<KickoffWave, ParsedSelection[]>();
+  for (const s of eligible) {
+    const w = kickoffWave(new Date(s.kickOffDateTime), now);
+    if (!byWave.has(w)) byWave.set(w, []);
+    byWave.get(w)!.push(s);
+  }
+  const all: Slip[] = [];
+  for (const wave of WAVE_ORDER) {
+    const pool = byWave.get(wave);
+    if (!pool || pool.length < config.minPicksPerSlip) continue;
+    // Generate within this wave only (no kickoffFrom/To needed — pool is the wave).
+    const waveSlips = await generateSlipsAsync(pool, config, undefined, scores);
+    // Tag each slip's wave for display.
+    for (const s of waveSlips) s.wave = wave;
+    all.push(...waveSlips);
+    onProgress?.(all.length);
+    await new Promise(r => setTimeout(r, 0));
+  }
+  return all;
 }
 
 // ─── Public: diverse slips for parallel chains ───────────────────────────────

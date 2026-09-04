@@ -64,6 +64,7 @@ export interface Slip {
   qualityScore: number;
   hasHighRiskPick: boolean;
   selectionCount: number;
+  wave?: string; // optional kickoff-wave tag (set by generateSlipsByWave)
 }
 
 // Grouping configuration

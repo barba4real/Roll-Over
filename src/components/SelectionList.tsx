@@ -5,6 +5,7 @@ import { ScoringResult } from '../engine/scoring';
 import { computeMatchIntelligence, MatchIntelligence, getFormString, getGoalAverages } from '../engine/intelligence-hints';
 import { getAllMatches } from '../engine/historical-stats';
 import { hasLocalData, crawlMatchHistory } from '../engine/match-crawl';
+import { kickoffWave, WAVE_ORDER, WAVE_LABEL, KickoffWave } from '../engine/grouping-engine';
 import MatchStatsModal from './MatchStatsModal';
 
 interface Props {
@@ -28,6 +29,7 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
   const [oddsMin, setOddsMin] = useState<string>('');
   const [oddsMax, setOddsMax] = useState<string>('');
   const [futureOnly, setFutureOnly] = useState<boolean>(false);
+  const [waveFilter, setWaveFilter] = useState<KickoffWave | 'all'>('all');
   const [sortBy, setSortBy] = useState<'kickoff' | 'kickoff_desc' | 'odds_asc' | 'odds_desc' | 'team' | 'score_desc'>('kickoff');
   const [statsModal, setStatsModal] = useState<ParsedSelection | null>(null);
   const [intelCache, setIntelCache] = useState<Map<string, MatchIntelligence>>(new Map());
@@ -174,7 +176,15 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
       if (!isNaN(kickoff) && kickoff <= Date.now() - 5 * 60 * 1000) futureMatch = false;
     }
 
-    return pickMatch && catMatch && dateMatch && rangeMatch && oddsMatch && futureMatch;
+    // Kickoff-wave filter (roll-over by wave): keep only fixtures in the chosen
+    // wave (Next 3h / 6h / 12h / Today / Tomorrow / Later), relative to now.
+    let waveMatch = true;
+    if (waveFilter !== 'all') {
+      const d = s.kickOffDateTime ? new Date(s.kickOffDateTime) : null;
+      waveMatch = !!d && !isNaN(d.getTime()) && kickoffWave(d) === waveFilter;
+    }
+
+    return pickMatch && catMatch && dateMatch && rangeMatch && oddsMatch && futureMatch && waveMatch;
   }).sort((a, b) => {
     switch (sortBy) {
       case 'kickoff': return new Date(a.kickOffDateTime).getTime() - new Date(b.kickOffDateTime).getTime();
@@ -192,12 +202,12 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
   // report null (generator uses the full pool). Keyed on the filter/sort INPUTS
   // (not the `filtered` array reference) to avoid an update loop.
   const anyFilterActive = pickFilter !== 'all' || marketFilter !== 'all' ||
-    dateFilter !== 'all' || !!dateFrom || !!dateTo || !!oddsMin || !!oddsMax || futureOnly;
+    dateFilter !== 'all' || !!dateFrom || !!dateTo || !!oddsMin || !!oddsMax || futureOnly || waveFilter !== 'all';
   useEffect(() => {
     if (!onUseFiltered) return;
     onUseFiltered(anyFilterActive ? filtered : null as any);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pickFilter, marketFilter, dateFilter, dateFrom, dateTo, oddsMin, oddsMax, futureOnly, sortBy, selections]);
+  }, [pickFilter, marketFilter, dateFilter, dateFrom, dateTo, oddsMin, oddsMax, futureOnly, waveFilter, sortBy, selections]);
 
   // Detect matches with multiple picks
   const matchPickCounts = useMemo(() => {
@@ -426,6 +436,26 @@ export default function SelectionList({ selections, scores, onUpdateOdds, onRemo
           <input type="checkbox" checked={futureOnly} onChange={(e) => setFutureOnly(e.target.checked)} className="rounded" />
           Future only
         </label>
+
+        {/* Kickoff-wave filter — "what plays together next" */}
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-gray-500">Wave:</span>
+          <button
+            onClick={() => setWaveFilter('all')}
+            className={`text-[10px] px-1.5 py-0.5 rounded ${waveFilter === 'all' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-gray-200'}`}
+          >
+            All
+          </button>
+          {WAVE_ORDER.filter(w => w !== 'later').map(w => (
+            <button
+              key={w}
+              onClick={() => setWaveFilter(waveFilter === w ? 'all' : w)}
+              className={`text-[10px] px-1.5 py-0.5 rounded ${waveFilter === w ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-gray-200'}`}
+            >
+              {WAVE_LABEL[w]}
+            </button>
+          ))}
+        </div>
 
         <div className="flex items-center gap-1">
           <span className="text-xs text-gray-500">Sort:</span>
