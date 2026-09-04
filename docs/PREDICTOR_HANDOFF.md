@@ -777,3 +777,133 @@ All confirmed **stretch, post-v1**, none blocking:
 a fresh pull, or `--fixtures` with a paste), the priority market is modeled honestly, and every
 remaining item is either deferred by the owner (D2/backfill) or a clearly-optional enhancement.
 Pick up E2/E3 sharpening opportunistically; hold the rest until the owner promotes one.
+
+---
+
+## Appendix F — PRIORITY REFRAME: venue-form profiling → preferred picks (supersedes "fouls-first")
+
+> **Read this as the corrected mission.** The original brief (§1, §6) framed the predictor as
+> **fouls-first**. That was wrong for how the owner actually bets. Where this appendix conflicts
+> with the fouls-first framing, **this appendix wins.** Nothing else about the offline / read-only
+> / fail-loud discipline changes.
+
+### F1 — The correction
+
+- **Fouls is NOT the priority.** In practice the owner finds fouls markets **rarely available**
+  on SportyBet, and (per D4) foul data is only ~2.2% of the DB. Fouls stays supported, but as a
+  **secondary/bonus** market behind the existing sample-size gate (D1) — surfaced *only when the
+  data exists*, never as the headline.
+- **The real target is the owner's PREFERRED PICKS** — the same starred set the app mirrors
+  (Appendix D): GG/NG, Over/Under (1.5/2.5/…), 1X2 and 1X2-1UP, Double Chance and DC-1UP, Win
+  Either Half, and the combos. These are overwhelmingly **goals-derived**, and goals are **densely
+  populated** in `historical_matches` (unlike fouls) — so this is the *confident* core, exactly
+  the opposite of the sparse fouls situation.
+- **The engine is venue-aware team-form profiling → pick suitability.** Profile each team's
+  **home** record and **away** record *separately*, then rank which preferred picks the fixture
+  supports for each side at its actual venue.
+
+### F2 — Venue-split team profiles (the foundation)
+
+For every team, compute **two independent profiles** from `historical_matches` — one from its
+**home** matches (`home_team = team`) and one from its **away** matches (`away_team = team`).
+`historical_matches` is row-per-match with explicit home/away columns, so these splits are direct.
+
+Per venue profile, from goal history (dense, high-confidence):
+
+- **Goals scored** avg + distribution (e.g. Lyon home: avg 2.1 scored)
+- **Goals conceded** avg + distribution (e.g. Lyon home: avg 1.2 conceded)
+- **Scored ≥1 rate**, **conceded ≥1 rate** (drive GG/NG)
+- **Over 1.5 / 2.5 / 3.5 rates** (combined match goals at that venue)
+- **Win / draw / loss rates** and **win-or-draw rate** (drive 1X2 and DC)
+- **BTTS (GG) rate**
+- **Clean-sheet rate**, **failed-to-score rate**
+- Optional: **first-half** versions (`ht_*` columns exist) for Win Either Half / half markets
+- Optional (dense enough): **corners** avg for the corner preferred markets
+
+Apply the **same discipline as fouls** but note it rarely bites here: sample-size `n` shown on
+every profile; recency weighting optional; league-baseline shrinkage (D1) available for thin
+teams. Because goals are dense, most teams will be `high` confidence — the gating exists but is
+seldom the limiting factor.
+
+### F3 — The canonical worked example (owner's own)
+
+> "If Lyon always scores a minimum of 2 goals in their home play and concedes on average, the
+> predictor should understand Lyon at home is possible for GG, Over 1.5, 1UP, DC, etc."
+
+So the flow is: **Lyon home profile** (scored avg ~2+, concedes ~1) → the predictor derives, for a
+Lyon *home* fixture:
+
+- **Over 1.5** — very likely (Lyon alone ~2 + opponent contribution) → high
+- **GG/NG (GG)** — likely (Lyon scores AND concedes on average) → high
+- **1X2 / 1X2-1UP** — Lyon favored (scores 2, concedes 1 → wins/leads often); the 1UP wrapper
+  makes it safer still → medium-high
+- **Double Chance / DC-1UP** — Lyon home win-or-draw rate high → high
+- **Over 2.5** — plausible if opponent also contributes → medium
+
+That mapping — *team venue form → the set of preferred picks it supports, each with a
+probability/confidence* — **is the predictor's primary output.**
+
+### F4 — Map each preferred market to its history signal
+
+The architect should compute each preferred pick from the venue profiles (independence
+approximations are fine for v1; refine later):
+
+| Preferred pick | Driven by (from venue profiles) |
+|---|---|
+| **Over 1.5 / 2.5 / 3.5** | Home team's scored-at-home + away team's scored-away → expected match goals (Poisson) → P(Over line) |
+| **GG/NG (GG)** | P(home scores) from home team's home scoring × P(away scores) from away team's away scoring |
+| **1X2** | Poisson on each side's venue expected goals → P(home win)/draw/away |
+| **1X2 - 1UP** | Same as 1X2 for the favored side; 1UP = early-payout wrapper → treat prob ≥ the raw 1X2 (it can only help), flag as "safer 1X2" |
+| **Double Chance** | P(home win) + P(draw) etc. from the 1X2 distribution |
+| **DC - 1UP** | DC with the early-payout wrapper → ≥ DC prob; "safer DC" |
+| **Win Either Half** | First-half + second-half win tendencies (`ht_*` split vs full-time) |
+| **Combos (1X2&O/U, DC&GG/NG, O/U&GG/NG, …)** | Product of the two marginal probabilities above (independence approx v1; note the assumption) |
+| **Corners (Home/Away Team Total)** | Team's corners avg at that venue, if corner coverage is adequate |
+| **Fouls (secondary)** | Unchanged: D1 gate; only when foul `n ≥ 5`; never the headline |
+
+**Note the 1UP/2UP wrappers** are SportyBet early-payout mechanics on an underlying outcome (1X2 /
+DC): the *underlying* probability is what the model computes; the wrapper only ever *improves* the
+effective outcome for the bettor, so treat 1UP/DC-1UP as "the same pick, safer" rather than a
+separate model.
+
+### F5 — Output shape (revised)
+
+Per fixture, output the **preferred picks it supports**, ranked by confidence, e.g.:
+
+```
+Lyon (H) vs Rennes (A)   France: Ligue 1   Sat 20:00
+  ✓ Over 1.5      82%  (Lyon home scored avg 2.1, n=14)
+  ✓ Double Chance 78%  (Lyon home W/D 79%)   [DC-1UP: safer]
+  ✓ GG            71%  (Lyon home GG 68%, Rennes away GG 74%)
+  ~ 1X2 Home      64%  (→ 1X2-1UP: safer)
+  ~ Over 2.5      58%
+  (fouls: no data)
+```
+
+- **Rank by model confidence**, preferred picks first; visually separate `low`-confidence.
+- Keep the **team totals / combos** where the marginals support them.
+- **`preferred_markets` table (Appendix D-odds)** becomes genuinely useful here: for any fixture
+  present there, the predictor can put **its probability next to SportyBet's live odds** and flag
+  **value** (`edge = model_prob − 1/odds`). This is the natural payoff of the reframe — the
+  owner's preferred picks, scored by the model, checked against the actual prices offered. Still
+  optional/stretch, but now it's the *obvious* next step rather than a side note.
+- Fouls appear only as a bonus line when foul `n ≥ 5`.
+
+### F6 — What changes in build order / scope
+
+- **Milestone priority flips:** build the **venue-split team-form profiler + goals-based preferred
+  picks (Over/Under, GG/NG, 1X2, DC, and the 1UP wrappers)** as the *core*. This replaces
+  "fouls model" as milestone 3.
+- **Fouls model** moves to a later, optional milestone (keep the D1 design — it's correct — just
+  no longer the priority).
+- **Everything else stands:** offline, read-only, team-name resolver (§5, still the make-or-break),
+  league scoping (D4), fail-loud, sample-size honesty.
+- **Data reality is favorable:** because goals are dense, the core preferred-pick predictions will
+  be *far* more confident and useful than the fouls model ever could be — this reframe plays to
+  the DB's strengths instead of its sparsest column.
+
+**One-line summary for the architect:** *Profile each team's home and away form from goal history,
+then for each fixture rank the owner's preferred picks (GG, Over lines, 1X2/1UP, DC/DC-1UP, Win
+Either Half, combos) by model probability — optionally checked against live odds in
+`preferred_markets` for value. Fouls is a low-priority bonus, gated by its sparse data, never the
+headline.*
