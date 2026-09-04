@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { ScoutedMatch, PickSuggestion } from '../engine/match-scout';
-import { TimeWindow, TIME_WINDOWS, fetchSportyBetFixtures } from '../engine/sportybet';
+import { TimeWindow, TIME_WINDOWS } from '../engine/sportybet';
+import { pullFixtures, getFixtureState } from '../engine/sportybet-store';
 import { setFootballDataKey } from '../engine/football-data-org';
 import { setSportmonksToken } from '../engine/sportmonks';
 import { ParsedSelection } from '../engine/types';
@@ -371,14 +372,12 @@ export default function MatchScout({ onAddPick }: Props) {
     try {
       let results: ScoutedMatch[] = [];
 
-      // ─── FIXTURES: SportyBet is the spine ─────────────────────────────────
+      // ─── FIXTURES: from the SHARED store (one pull feeds Scout + Markets) ──
       // Every scouted fixture comes from SportyBet — the book we actually play.
       // Historical DB (predictMatch) + Flashscore matchId caching remain as
       // ENRICHMENT feeders only, layered onto the SportyBet fixture list.
-      const sbResult = await fetchSportyBetFixtures({
-        region: 'ng', maxPages: 12, pageSize: 30, window: win,
-        onProgress: (m) => setSyncMessage(m),
-      });
+      await pullFixtures({ window: win, maxPages: 12, force: true });
+      const sbResult = getFixtureState();
       setSyncMessage(null);
 
       if (signal.aborted) return;

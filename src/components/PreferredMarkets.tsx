@@ -16,7 +16,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { ParsedSelection } from '../engine/types';
 import {
-  fetchSportyBetFixtures,
   fetchFixtureMarkets,
   preferredRowToSelection,
   SbFixture,
@@ -24,17 +23,21 @@ import {
   TimeWindow,
   TIME_WINDOWS,
 } from '../engine/sportybet';
+import { useFixtureStore, pullFixtures } from '../engine/sportybet-store';
 
 interface Props {
   onImport?: (sels: ParsedSelection[]) => void;
 }
 
 export default function PreferredMarkets({ onImport }: Props) {
-  const [fixtures, setFixtures] = useState<SbFixture[]>([]);
-  const [leagues, setLeagues] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
-  const [win, setWin] = useState<TimeWindow>('');
+  // Fixtures come from the SHARED store — one pull feeds both Markets + Scout.
+  const store = useFixtureStore();
+  const fixtures = store.fixtures;
+  const leagues = store.leagues;
+  const loading = store.loading;
+  const status = store.progress || store.error;
+  const win = store.window;
+
   const [leagueFilter, setLeagueFilter] = useState<string>('');
   const [maxPages, setMaxPages] = useState(10);
   const [onlyPreferred, setOnlyPreferred] = useState(true);
@@ -45,36 +48,15 @@ export default function PreferredMarkets({ onImport }: Props) {
   const [modalLoading, setModalLoading] = useState(false);
   const [imported, setImported] = useState<Set<string>>(new Set());
 
-  async function handleScan() {
-    setLoading(true);
-    setStatus('Loading SportyBet fixtures…');
-    setFixtures([]);
-    try {
-      const res = await fetchSportyBetFixtures({
-        region: 'ng',
-        maxPages,
-        pageSize: 30,
-        window: win,
-        onProgress: (m) => setStatus(m),
-      });
-      setFixtures(res.fixtures);
-      setLeagues(res.leagues);
-      setStatus(res.fixtures.length === 0
-        ? 'No fixtures found. If this persists, confirm the Cloudflare Worker is redeployed (sportybet.com whitelisted).'
-        : `Loaded ${res.fixtures.length} fixture(s).`);
-    } catch (e: any) {
-      setStatus(`Load failed: ${e?.message || 'unknown error'}`);
-    } finally {
-      setLoading(false);
-      setTimeout(() => setStatus(s => (s && s.startsWith('Loaded')) ? null : s), 6000);
-    }
+  function handleScan() {
+    // Force a fresh pull into the shared store (updates Scout too).
+    void pullFixtures({ window: win, maxPages, force: true });
   }
 
-  // Re-scan when the window changes (if we already have data or user is active)
-  useEffect(() => {
-    if (fixtures.length > 0) handleScan();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [win]);
+  function setWin(w: TimeWindow) {
+    // Changing the window triggers a shared re-pull for that window.
+    void pullFixtures({ window: w, maxPages });
+  }
 
   const shown = useMemo(() => {
     let list = fixtures;
@@ -138,13 +120,20 @@ export default function PreferredMarkets({ onImport }: Props) {
           <h3 className="text-md font-semibold text-green-400">Markets — SportyBet Fixtures</h3>
           <p className="text-[11px] text-gray-500">The fixtures SportyBet showcases (the book you play). Click a fixture to see your preferred markets — fouls locked lines shown for pre-staging.</p>
         </div>
-        <button
-          onClick={handleScan}
-          disabled={loading}
-          className="px-3 py-1.5 bg-green-700 hover:bg-green-600 disabled:bg-gray-600 rounded text-xs font-medium text-white"
-        >
-          {loading ? 'Loading…' : '⟳ Load fixtures'}
-        </button>
+        <div className="flex items-center gap-2">
+          {store.pulledAt && (
+            <span className="text-[10px] text-gray-600">
+              {(() => { const m = Math.round((Date.now() - store.pulledAt) / 60000); return m < 60 ? `pulled ${m}m ago` : `pulled ${Math.round(m / 60)}h ago`; })()}
+            </span>
+          )}
+          <button
+            onClick={handleScan}
+            disabled={loading}
+            className="px-3 py-1.5 bg-green-700 hover:bg-green-600 disabled:bg-gray-600 rounded text-xs font-medium text-white"
+          >
+            {loading ? 'Loading…' : '⟳ Load fixtures'}
+          </button>
+        </div>
       </div>
 
       {/* Time-window presets */}
