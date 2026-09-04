@@ -120,6 +120,10 @@ export default function MatchScout({ onAddPick }: Props) {
   const [showGuide, setShowGuide] = useState(false);
   const [visibleCount, setVisibleCount] = useState(30);
   const [groupByLeague, setGroupByLeague] = useState(false);
+  // ─── Post-scout client-side filters (no re-fetch) ──────────────────────────
+  const [filterLeagues, setFilterLeagues] = useState<Set<string>>(new Set());
+  const [filterWindow, setFilterWindow] = useState<'all' | '3h' | '6h' | 'today' | 'tomorrow'>('all');
+  const [filterText, setFilterText] = useState('');
 
   // Load historical data into memory on mount
   useEffect(() => {
@@ -176,6 +180,56 @@ export default function MatchScout({ onAddPick }: Props) {
   );
 
   const selectedCount = selectedLeagueIds.length;
+
+  // Leagues present in the current scouted results (for the post-scout filter).
+  const resultLeagues = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const m of matches) {
+      const name = m.league.name || 'Unknown';
+      counts.set(name, (counts.get(name) || 0) + 1);
+    }
+    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+  }, [matches]);
+
+  // Client-side filtered view of the scouted results — no network, instant.
+  const filteredMatches = useMemo(() => {
+    const now = Date.now();
+    const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+    const endOfToday = new Date(); endOfToday.setHours(23, 59, 59, 999);
+    const startOfTomorrow = new Date(startOfToday.getTime() + 24 * 60 * 60 * 1000);
+    const endOfTomorrow = new Date(endOfToday.getTime() + 24 * 60 * 60 * 1000);
+    const q = filterText.trim().toLowerCase();
+
+    return matches.filter(m => {
+      // League filter (empty set = all leagues)
+      if (filterLeagues.size > 0 && !filterLeagues.has(m.league.name || 'Unknown')) return false;
+
+      // Kickoff-window filter
+      if (filterWindow !== 'all') {
+        const ko = new Date(m.kickOff).getTime();
+        if (isNaN(ko)) return false;
+        if (filterWindow === '3h' && !(ko >= now && ko <= now + 3 * 3600e3)) return false;
+        if (filterWindow === '6h' && !(ko >= now && ko <= now + 6 * 3600e3)) return false;
+        if (filterWindow === 'today' && !(ko >= startOfToday.getTime() && ko <= endOfToday.getTime())) return false;
+        if (filterWindow === 'tomorrow' && !(ko >= startOfTomorrow.getTime() && ko <= endOfTomorrow.getTime())) return false;
+      }
+
+      // Text search across team + league names
+      if (q) {
+        const hay = `${m.homeTeam.name} ${m.awayTeam.name} ${m.league.name}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [matches, filterLeagues, filterWindow, filterText]);
+
+  function toggleFilterLeague(name: string) {
+    setFilterLeagues(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+  }
 
   const regions = useMemo(() => getAllRegions(), []);
 
@@ -902,9 +956,57 @@ export default function MatchScout({ onAddPick }: Props) {
       {/* Results */}
       {matches.length > 0 && (
         <div className="space-y-2">
+          {/* Post-scout filter bar (client-side, no re-fetch) */}
+          <div className="p-2 bg-gray-800 border border-gray-700 rounded-lg space-y-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <input
+                type="text"
+                value={filterText}
+                onChange={(e) => setFilterText(e.target.value)}
+                placeholder="Filter team or league…"
+                className="flex-1 min-w-[140px] px-2 py-1 bg-gray-900 border border-gray-600 rounded text-xs text-gray-300 placeholder-gray-600"
+              />
+              <div className="flex items-center gap-1">
+                {(['all', '3h', '6h', 'today', 'tomorrow'] as const).map(w => (
+                  <button
+                    key={w}
+                    onClick={() => setFilterWindow(w)}
+                    className={`text-[10px] px-2 py-1 rounded ${filterWindow === w ? 'bg-blue-700 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}
+                  >
+                    {w === 'all' ? 'Any time' : w === '3h' ? 'Next 3h' : w === '6h' ? 'Next 6h' : w === 'today' ? 'Today' : 'Tomorrow'}
+                  </button>
+                ))}
+              </div>
+              {(filterLeagues.size > 0 || filterWindow !== 'all' || filterText) && (
+                <button
+                  onClick={() => { setFilterLeagues(new Set()); setFilterWindow('all'); setFilterText(''); }}
+                  className="text-[10px] px-2 py-1 rounded bg-gray-700 text-gray-300 hover:bg-gray-600"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            {/* League chips from the scouted results */}
+            {resultLeagues.length > 1 && (
+              <div className="flex items-center gap-1 flex-wrap max-h-24 overflow-y-auto">
+                {resultLeagues.map(([name, count]) => (
+                  <button
+                    key={name}
+                    onClick={() => toggleFilterLeague(name)}
+                    className={`text-[10px] px-1.5 py-0.5 rounded ${filterLeagues.has(name) ? 'bg-indigo-700 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}
+                    title={`${count} matches`}
+                  >
+                    {name} <span className="opacity-60">{count}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
           <div className="flex items-center justify-between">
             <p className="text-xs text-gray-500">
-              Showing {Math.min(visibleCount, matches.length)} of {matches.length} matches
+              Showing {Math.min(visibleCount, filteredMatches.length)} of {filteredMatches.length}
+              {filteredMatches.length !== matches.length && <span className="text-gray-600"> (filtered from {matches.length})</span>}
             </p>
             <div className="flex items-center gap-2">
               <button
@@ -931,7 +1033,7 @@ export default function MatchScout({ onAddPick }: Props) {
           {groupByLeague ? (
             (() => {
               const groups: Record<string, typeof matches> = {};
-              for (const m of matches.slice(0, visibleCount)) {
+              for (const m of filteredMatches.slice(0, visibleCount)) {
                 const key = m.league.name || 'Unknown';
                 if (!groups[key]) groups[key] = [];
                 groups[key].push(m);
@@ -970,7 +1072,7 @@ export default function MatchScout({ onAddPick }: Props) {
             })()
           ) : (
           /* Flat list view */
-          matches.slice(0, visibleCount).map((match) => (
+          filteredMatches.slice(0, visibleCount).map((match) => (
             <div key={match.fixtureId} className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
               <div
                 onClick={() => setExpandedMatch(expandedMatch === match.fixtureId ? null : match.fixtureId)}
@@ -1107,13 +1209,21 @@ export default function MatchScout({ onAddPick }: Props) {
           )}
 
           {/* Load More button */}
-          {visibleCount < matches.length && (
+          {visibleCount < filteredMatches.length && (
             <button
               onClick={() => setVisibleCount(prev => prev + 30)}
               className="w-full py-2 mt-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-xs text-gray-400 hover:text-gray-200 font-medium"
             >
-              Load More ({matches.length - visibleCount} remaining)
+              Load More ({filteredMatches.length - visibleCount} remaining)
             </button>
+          )}
+
+          {/* No matches after filtering */}
+          {filteredMatches.length === 0 && (
+            <div className="text-center py-6 text-gray-500 text-xs">
+              No matches for the current filters.
+              <button onClick={() => { setFilterLeagues(new Set()); setFilterWindow('all'); setFilterText(''); }} className="ml-1 text-blue-400 hover:underline">Clear filters</button>
+            </div>
           )}
         </div>
       )}
