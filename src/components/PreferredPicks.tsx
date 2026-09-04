@@ -13,20 +13,30 @@ import { ParsedSelection } from '../engine/types';
 import {
   confirmPreferredFixtures,
   preferredRowToSelection,
+  sectionForKey,
   NON_FOULS_PREFERRED_KEYS,
   ConfirmedFixture,
+  PreferredSection,
+  PreferredMarketRow,
   TimeWindow,
   TIME_WINDOWS,
 } from '../engine/sportybet';
+
+const SECTION_ORDER: PreferredSection[] = ['Early-Payout', 'Combos', 'Halves', 'Corners', 'Team Totals', 'Other'];
 
 interface Props {
   onImport?: (sels: ParsedSelection[]) => void;
 }
 
-const KEY_COLOR: Record<string, string> = {
-  '1x2_1up': 'border-green-800 bg-green-900/30 text-green-300',
-  'dc_1up': 'border-emerald-800 bg-emerald-900/30 text-emerald-300',
-  'win_either_half': 'border-blue-800 bg-blue-900/30 text-blue-300',
+// Row color by section (via the row's key -> section).
+const SECTION_COLOR: Record<PreferredSection, string> = {
+  'Early-Payout': 'border-green-800 bg-green-900/30 text-green-300',
+  'Combos': 'border-emerald-800 bg-emerald-900/30 text-emerald-300',
+  'Halves': 'border-blue-800 bg-blue-900/30 text-blue-300',
+  'Corners': 'border-cyan-800 bg-cyan-900/30 text-cyan-300',
+  'Team Totals': 'border-purple-800 bg-purple-900/30 text-purple-300',
+  'Other': 'border-gray-600 bg-gray-800 text-gray-300',
+  'Fouls': 'border-amber-800 bg-amber-900/30 text-amber-300',
 };
 
 export default function PreferredPicks({ onImport }: Props) {
@@ -78,8 +88,9 @@ export default function PreferredPicks({ onImport }: Props) {
         <div>
           <h2 className="text-lg font-bold text-green-400">Preferred Markets</h2>
           <p className="text-[11px] text-gray-500">
-            Fixtures that offer your signature markets — 1X2-1UP, Double Chance-1UP, Win Either Half —
-            confirmed per-event with live lines/odds. Browse the full pool in the Markets tab.
+            Fixtures that offer your ⭐ SportyBet favorites — early-payout, combos, halves, corners,
+            team totals — confirmed per-event with live lines/odds, grouped by section. Browse the
+            full pool in the Markets tab; fouls have their own tab.
           </p>
         </div>
       </div>
@@ -140,30 +151,50 @@ export default function PreferredPicks({ onImport }: Props) {
                       <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-400" title="No open line yet — unlocks nearer kickoff">🔒 pre-stage</span>
                     )}
                   </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {fx.markets.map((row, ri) => {
-                      const key = `${fx.eventId}-${row.marketLabel}-${row.line}`;
-                      const wasImported = imported.has(key);
-                      return (
-                        <button
-                          key={ri}
-                          disabled={row.locked || wasImported}
-                          onClick={() => importRow(fx, ri)}
-                          className={`text-[10px] px-1.5 py-0.5 rounded border ${
-                            row.locked
-                              ? 'border-gray-700 bg-gray-800 text-gray-500 cursor-default'
-                              : wasImported
-                                ? 'border-gray-600 bg-gray-700 text-gray-400 cursor-default'
-                                : (KEY_COLOR[row.key] || 'border-gray-600 bg-gray-800 text-gray-300') + ' hover:brightness-125'
-                          }`}
-                          title={row.marketLabel}
-                        >
-                          {row.marketLabel}: {row.line}
-                          {row.locked ? ' 🔒' : wasImported ? ' ✓' : ` @ ${row.odds} +`}
-                        </button>
-                      );
-                    })}
-                  </div>
+                  {(() => {
+                    // Group this fixture's rows by section, preserving each row's
+                    // original index (importRow needs it).
+                    const bySection = new Map<PreferredSection, { row: PreferredMarketRow; idx: number }[]>();
+                    fx.markets.forEach((row, idx) => {
+                      const sec = sectionForKey(row.key);
+                      if (!bySection.has(sec)) bySection.set(sec, []);
+                      bySection.get(sec)!.push({ row, idx });
+                    });
+                    const orderedSections = SECTION_ORDER.filter(s => bySection.has(s));
+                    return (
+                      <div className="space-y-1.5">
+                        {orderedSections.map(sec => (
+                          <div key={sec}>
+                            <div className="text-[9px] uppercase tracking-wide text-gray-500 mb-0.5">{sec}</div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {bySection.get(sec)!.map(({ row, idx }) => {
+                                const key = `${fx.eventId}-${row.marketLabel}-${row.line}`;
+                                const wasImported = imported.has(key);
+                                return (
+                                  <button
+                                    key={idx}
+                                    disabled={row.locked || wasImported}
+                                    onClick={() => importRow(fx, idx)}
+                                    className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                                      row.locked
+                                        ? 'border-gray-700 bg-gray-800 text-gray-500 cursor-default'
+                                        : wasImported
+                                          ? 'border-gray-600 bg-gray-700 text-gray-400 cursor-default'
+                                          : SECTION_COLOR[sec] + ' hover:brightness-125'
+                                    }`}
+                                    title={row.marketLabel}
+                                  >
+                                    {row.marketLabel}: {row.line}
+                                    {row.locked ? ' 🔒' : wasImported ? ' ✓' : ` @ ${row.odds} +`}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
               ))}
             </div>
@@ -174,7 +205,7 @@ export default function PreferredPicks({ onImport }: Props) {
       {!loading && fixtures.length === 0 && (
         <div className="text-center py-12 text-gray-500">
           <p className="text-sm">Click "Scan preferred markets" to find fixtures offering your signature picks</p>
-          <p className="text-xs mt-1">1X2-1UP · Double Chance-1UP · Win Either Half — with live SportyBet lines</p>
+          <p className="text-xs mt-1">Early-payout · combos · halves · corners · team totals — with live SportyBet lines</p>
         </div>
       )}
     </div>

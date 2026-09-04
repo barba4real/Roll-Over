@@ -45,16 +45,37 @@ const MARKET_IDS = '1,10,11,18,26,29,36,14,60100,60200';
 // The scan filter is now derived from the PREFERRED_MARKETS registry below
 // (PREFERRED_IDS_CSV), so adding a market in one place updates the query too.
 
-export type PreferredMarketKey = '1x2_1up' | 'dc_1up' | 'win_either_half' | 'home_fouls' | 'away_fouls';
+// The user's signature markets, mirrored from their SportyBet ⭐ favorites.
+// Each key is stable; ids are confirmed from SportyBet's per-event catalog.
+export type PreferredMarketKey =
+  // Early-payout
+  | '1x2_1up' | '1x2_2up' | 'dc_1up'
+  // Combos
+  | '1x2_ou' | 'dc_ou' | 'dc_ggng' | 'ou_ggng' | '1x2_ggng'
+  | 'home_or_ou25' | 'away_or_ou25'
+  // Halves
+  | 'win_either_half' | 'highest_scoring_half' | 'fh_1x2_ou' | 'fh_dc' | 'fh_1x2_ggng'
+  // Corners
+  | 'home_corners' | 'away_corners'
+  // Team totals
+  | 'home_ou' | 'away_ou'
+  // Other
+  | 'score_3_in_row' | 'ten_min_1x2'
+  // Fouls (own tab)
+  | 'home_fouls' | 'away_fouls';
+
+// Which section of the Preferred tab a market belongs to.
+export type PreferredSection = 'Early-Payout' | 'Combos' | 'Halves' | 'Corners' | 'Team Totals' | 'Other' | 'Fouls';
 
 // ─── Preferred-market registry (single place to add a new preferred market) ──
 // To add a market later: append one entry here with its SportyBet market id(s),
-// a stable key, a display label, and (optionally) a desc-text matcher fallback.
-// Everything downstream (scan filter, classification, modal grouping) is driven
-// off this table, so no other code needs editing.
+// a stable key, a display label, a section, and (optionally) a desc-text matcher
+// fallback. Everything downstream (scan filter, classification, modal + tab
+// grouping) is driven off this table, so no other code needs editing.
 export interface PreferredMarketDef {
   key: PreferredMarketKey;
-  label: string;                 // shown in the modal group header
+  label: string;                 // shown in the app (team-agnostic — never a raw team name)
+  section: PreferredSection;
   ids: string[];                 // SportyBet market ids that map to this key
   // Optional fallback matcher on the market desc/group when id shifts.
   match?: (descLower: string, groupLower: string) => boolean;
@@ -63,27 +84,63 @@ export interface PreferredMarketDef {
 }
 
 export const PREFERRED_MARKETS: PreferredMarketDef[] = [
-  { key: '1x2_1up', label: '1X2 - 1UP', ids: ['60200'] },
-  { key: 'dc_1up', label: 'Double Chance - 1UP', ids: ['60110'] },
-  { key: 'win_either_half', label: 'Win Either Half', ids: ['50', '51'] },
+  // ── Early-Payout ──
+  { key: '1x2_1up', label: '1X2 - 1UP', section: 'Early-Payout', ids: ['60200'] },
+  { key: '1x2_2up', label: '1X2 - 2UP', section: 'Early-Payout', ids: ['60100'] },
+  { key: 'dc_1up', label: 'Double Chance - 1UP', section: 'Early-Payout', ids: ['60110'] },
+
+  // ── Combos ──
+  { key: '1x2_ou', label: '1X2 & Over/Under', section: 'Combos', ids: ['37'] },
+  { key: 'dc_ou', label: 'Double Chance & Over/Under', section: 'Combos', ids: ['547'] },
+  { key: 'dc_ggng', label: 'Double Chance & GG/NG', section: 'Combos', ids: ['546'] },
+  { key: 'ou_ggng', label: 'Over/Under & GG/NG', section: 'Combos', ids: ['36'] },
+  { key: '1x2_ggng', label: '1X2 & GG/NG', section: 'Combos', ids: ['35'] },
+  { key: 'home_or_ou25', label: 'Home Team or Over/Under 2.5', section: 'Combos', ids: ['854', '855'] },
+  { key: 'away_or_ou25', label: 'Away Team or Over/Under 2.5', section: 'Combos', ids: ['858', '859'] },
+
+  // ── Halves ──
+  { key: 'win_either_half', label: 'Win Either Half', section: 'Halves', ids: ['50', '51'] },
+  { key: 'highest_scoring_half', label: 'Highest Scoring Half', section: 'Halves', ids: ['52', '53', '54'] },
+  { key: 'fh_1x2_ou', label: '1st Half - 1X2 & Over/Under', section: 'Halves', ids: ['79'] },
+  { key: 'fh_dc', label: '1st Half - Double Chance', section: 'Halves', ids: ['63'] },
+  { key: 'fh_1x2_ggng', label: '1st Half - 1X2 & GG/NG', section: 'Halves', ids: ['78'] },
+
+  // ── Corners ──
+  { key: 'home_corners', label: 'Home Team Total Corners', section: 'Corners', ids: ['900300'] },
+  { key: 'away_corners', label: 'Away Team Total Corners', section: 'Corners', ids: ['900301'] },
+
+  // ── Team Totals ── (SportyBet names these with the team name; we normalize to Home/Away)
+  { key: 'home_ou', label: 'Home Team Over/Under', section: 'Team Totals', ids: ['19'] },
+  { key: 'away_ou', label: 'Away Team Over/Under', section: 'Team Totals', ids: ['20'] },
+
+  // ── Other ──
+  { key: 'score_3_in_row', label: 'To Score 3+ in a Row', section: 'Other', ids: ['60020', '60021', '60022'] },
+  { key: 'ten_min_1x2', label: '10 Minutes - 1X2', section: 'Other', ids: ['105'] },
+
+  // ── Fouls (shown in the dedicated Fouls tab) ──
   {
-    key: 'home_fouls', label: 'Home Team Fouls O/U', ids: ['900544'],
+    key: 'home_fouls', label: 'Home Team Fouls O/U', section: 'Fouls', ids: ['900544'],
     match: (d, g) => (d.includes('foul') && d.includes('home')) || (g === 'fouls' && d.includes('home')),
     surfaceWhenLocked: true,
   },
   {
-    key: 'away_fouls', label: 'Away Team Fouls O/U', ids: ['900545'],
+    key: 'away_fouls', label: 'Away Team Fouls O/U', section: 'Fouls', ids: ['900545'],
     match: (d, g) => (d.includes('foul') && d.includes('away')) || (g === 'fouls' && d.includes('away')),
     surfaceWhenLocked: true,
   },
   // Match-total fouls (both teams). No home/away in desc; bucket under home_fouls
   // so it still surfaces. Kept last so home/away ids match first.
   {
-    key: 'home_fouls', label: 'Match Fouls O/U', ids: ['900342'],
+    key: 'home_fouls', label: 'Match Fouls O/U', section: 'Fouls', ids: ['900342'],
     match: (d) => d.includes('foul') && !d.includes('home') && !d.includes('away'),
     surfaceWhenLocked: true,
   },
 ];
+
+/** Section for a preferred key (first registry entry with that key). */
+export function sectionForKey(key: PreferredMarketKey): PreferredSection {
+  return PREFERRED_MARKETS.find(m => m.key === key)?.section ?? 'Other';
+}
 
 // Comma-joined id list for the scan filter, derived from the registry.
 const PREFERRED_IDS_CSV = Array.from(new Set(PREFERRED_MARKETS.flatMap(m => m.ids))).join(',');
@@ -603,7 +660,11 @@ export const FOULS_MARKET_IDS = ['900544', '900545', '900342'];
 
 // Convenience key groups for the dedicated tabs.
 export const FOULS_KEYS: PreferredMarketKey[] = ['home_fouls', 'away_fouls'];
-export const NON_FOULS_PREFERRED_KEYS: PreferredMarketKey[] = ['1x2_1up', 'dc_1up', 'win_either_half'];
+// Everything the Preferred tab confirms — all preferred keys except fouls
+// (fouls have their own tab), derived from the registry so it stays in sync.
+export const NON_FOULS_PREFERRED_KEYS: PreferredMarketKey[] = Array.from(
+  new Set(PREFERRED_MARKETS.map(m => m.key).filter(k => k !== 'home_fouls' && k !== 'away_fouls')),
+);
 
 /**
  * A fixture confirmed (via the per-event endpoint) to carry a chosen subset of
@@ -721,9 +782,14 @@ export async function confirmFoulsFixtures(opts?: {
  */
 export function preferredRowToSelection(fx: PreferredFixture, row: PreferredMarketRow): ParsedSelection {
   const marketType: ParsedSelection['marketType'] =
-    row.key === '1x2_1up' ? '1x2' :
-    row.key === 'dc_1up' ? 'double_chance' :
+    (row.key === '1x2_1up' || row.key === '1x2_2up' || row.key === 'ten_min_1x2') ? '1x2' :
+    (row.key === 'dc_1up' || row.key === 'fh_dc') ? 'double_chance' :
     (row.key === 'home_fouls' || row.key === 'away_fouls') ? 'fouls' :
+    (row.key === 'home_corners' || row.key === 'away_corners') ? 'corners' :
+    (row.key === 'home_ou' || row.key === 'away_ou') ? 'over_under_team' :
+    (row.key === '1x2_ou' || row.key === 'dc_ou' || row.key === 'dc_ggng' || row.key === 'ou_ggng' ||
+     row.key === '1x2_ggng' || row.key === 'home_or_ou25' || row.key === 'away_or_ou25' ||
+     row.key === 'fh_1x2_ou' || row.key === 'fh_1x2_ggng') ? 'combo' :
     'special';
   const category: ParsedSelection['pickCategory'] =
     row.line.toLowerCase().includes('over') ? 'over' :
