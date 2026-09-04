@@ -12,7 +12,6 @@ import GeneratedSlips from './components/GeneratedSlips';
 import ActiveSlips from './components/ActiveSlips';
 import SlipHistory from './components/SlipHistory';
 import MatchScout from './components/MatchScout';
-import MatchSearch from './components/MatchSearch';
 import FoulsStrategy from './components/FoulsStrategy';
 import PreferredMarkets from './components/PreferredMarkets';
 import { ParsedSelection, Slip, Chain } from './engine/types';
@@ -36,7 +35,7 @@ export interface StakedSlip {
   label: string; // User-defined name/note for this slip
 }
 
-type View = 'home' | 'paste' | 'search' | 'slips' | 'history' | 'fouls' | 'sporty';
+type View = 'home' | 'paste' | 'slips' | 'history' | 'fouls' | 'sporty';
 
 export default function App() {
   const [view, setView] = useState<View>('home');
@@ -799,12 +798,13 @@ export default function App() {
           Paste & Build {selections.length > 0 && <span className="ml-1 bg-blue-700 text-white px-1.5 py-0.5 rounded-full text-xs">{selections.length}</span>}
         </button>
         <button
-          onClick={() => setView('search')}
+          onClick={() => setView('sporty')}
           className={`px-4 py-2 rounded text-sm font-medium ${
-            view === 'search' ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-700'
+            view === 'sporty' ? 'bg-green-600 text-white' : 'text-gray-300 hover:bg-gray-700'
           }`}
+          title="SportyBet fixtures — the book you play. Click a fixture for your preferred markets."
         >
-          Search
+          Markets
         </button>
         <button
           onClick={() => setView('fouls')}
@@ -813,15 +813,6 @@ export default function App() {
           }`}
         >
           Fouls
-        </button>
-        <button
-          onClick={() => setView('sporty')}
-          className={`px-4 py-2 rounded text-sm font-medium ${
-            view === 'sporty' ? 'bg-green-600 text-white' : 'text-gray-300 hover:bg-gray-700'
-          }`}
-          title="Scan SportyBet for fixtures offering your preferred markets"
-        >
-          Markets
         </button>
         <button
           onClick={() => setView('slips')}
@@ -1310,19 +1301,6 @@ export default function App() {
                 </>
               )}
             </div>
-          </div>
-        )}
-
-        {view === 'search' && (
-          <div className="h-full pb-16">
-          <MatchSearch onAddPicks={(picks) => {
-            setSelections(prev => {
-              const existing = new Set(prev.map(s => `${s.homeTeam.toLowerCase()}-${s.awayTeam.toLowerCase()}`));
-              const newPicks = picks.filter(p => !existing.has(`${p.homeTeam.toLowerCase()}-${p.awayTeam.toLowerCase()}`));
-              return [...prev, ...newPicks];
-            });
-            setView('paste');
-          }} onStatsLoaded={() => setStatsVersion(v => v + 1)} />
           </div>
         )}
 

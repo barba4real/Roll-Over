@@ -42,11 +42,51 @@ const MARKET_IDS = '1,10,11,18,26,29,36,14,60100,60200';
 //   900545 = Away Team Fouls Over/Under (LSPORTS, group "Teams", league-gated)
 //   900342 = Match Fouls Over/Under (both teams combined, group "Match")
 // Confirmed live from the factsCenter event catalog (EPL Brentford v Sunderland).
-// We ALSO detect fouls by desc text ("...fouls...") so it keeps working even if
-// the numeric id shifts, provided the id is in this filter so the market returns.
-const PREFERRED_MARKET_IDS = '60200,60110,50,51,900544,900545,900342';
+// The scan filter is now derived from the PREFERRED_MARKETS registry below
+// (PREFERRED_IDS_CSV), so adding a market in one place updates the query too.
 
 export type PreferredMarketKey = '1x2_1up' | 'dc_1up' | 'win_either_half' | 'home_fouls' | 'away_fouls';
+
+// ─── Preferred-market registry (single place to add a new preferred market) ──
+// To add a market later: append one entry here with its SportyBet market id(s),
+// a stable key, a display label, and (optionally) a desc-text matcher fallback.
+// Everything downstream (scan filter, classification, modal grouping) is driven
+// off this table, so no other code needs editing.
+export interface PreferredMarketDef {
+  key: PreferredMarketKey;
+  label: string;                 // shown in the modal group header
+  ids: string[];                 // SportyBet market ids that map to this key
+  // Optional fallback matcher on the market desc/group when id shifts.
+  match?: (descLower: string, groupLower: string) => boolean;
+  // For fouls-type markets we surface even when locked (they unlock pre-kickoff).
+  surfaceWhenLocked?: boolean;
+}
+
+export const PREFERRED_MARKETS: PreferredMarketDef[] = [
+  { key: '1x2_1up', label: '1X2 - 1UP', ids: ['60200'] },
+  { key: 'dc_1up', label: 'Double Chance - 1UP', ids: ['60110'] },
+  { key: 'win_either_half', label: 'Win Either Half', ids: ['50', '51'] },
+  {
+    key: 'home_fouls', label: 'Home Team Fouls O/U', ids: ['900544'],
+    match: (d, g) => (d.includes('foul') && d.includes('home')) || (g === 'fouls' && d.includes('home')),
+    surfaceWhenLocked: true,
+  },
+  {
+    key: 'away_fouls', label: 'Away Team Fouls O/U', ids: ['900545'],
+    match: (d, g) => (d.includes('foul') && d.includes('away')) || (g === 'fouls' && d.includes('away')),
+    surfaceWhenLocked: true,
+  },
+  // Match-total fouls (both teams). No home/away in desc; bucket under home_fouls
+  // so it still surfaces. Kept last so home/away ids match first.
+  {
+    key: 'home_fouls', label: 'Match Fouls O/U', ids: ['900342'],
+    match: (d) => d.includes('foul') && !d.includes('home') && !d.includes('away'),
+    surfaceWhenLocked: true,
+  },
+];
+
+// Comma-joined id list for the scan filter, derived from the registry.
+const PREFERRED_IDS_CSV = Array.from(new Set(PREFERRED_MARKETS.flatMap(m => m.ids))).join(',');
 
 export interface PreferredMarketRow {
   key: PreferredMarketKey;
@@ -68,6 +108,68 @@ export interface PreferredFixture {
   date: string;                    // DD/MM
   time: string;                    // HH:MM
   markets: PreferredMarketRow[];   // only the user's preferred markets present
+}
+
+// A plain fixture row for the consolidated Markets tab — NO market expansion.
+// One row per SportyBet event. Markets are fetched on demand when clicked.
+export interface SbFixture {
+  eventId: string;
+  gameId: string;
+  homeTeam: string;
+  awayTeam: string;
+  country: string;                 // e.g. "England"
+  leagueName: string;              // e.g. "Premier League"
+  league: string;                  // "Country: League" (display)
+  kickoff: Date;
+  date: string;                    // DD/MM
+  time: string;                    // HH:MM
+  hasPreferred: boolean;           // event was returned under the preferred-id filter,
+                                   // i.e. it offers at least one preferred market
+}
+
+// Time-window presets for the fixture list. Extensible: add an entry here and a
+// case in withinWindow(). '' = no window (all upcoming).
+export type TimeWindow = '' | '3h' | '6h' | 'today' | 'tomorrow' | 'weekend';
+
+export const TIME_WINDOWS: { key: TimeWindow; label: string }[] = [
+  { key: '', label: 'All upcoming' },
+  { key: '3h', label: 'Next 3 hours' },
+  { key: '6h', label: 'Next 6 hours' },
+  { key: 'today', label: 'Today' },
+  { key: 'tomorrow', label: 'Tomorrow' },
+  { key: 'weekend', label: 'Weekend' },
+];
+
+/** True if a kickoff falls within the selected time window (local time). */
+export function withinWindow(kickoff: Date, win: TimeWindow, now: Date = new Date()): boolean {
+  const t = kickoff.getTime();
+  if (t <= now.getTime()) return false; // upcoming only
+  switch (win) {
+    case '': return true;
+    case '3h': return t <= now.getTime() + 3 * 3600_000;
+    case '6h': return t <= now.getTime() + 6 * 3600_000;
+    case 'today': {
+      const end = new Date(now); end.setHours(23, 59, 59, 999);
+      return t <= end.getTime();
+    }
+    case 'tomorrow': {
+      const start = new Date(now); start.setDate(start.getDate() + 1); start.setHours(0, 0, 0, 0);
+      const end = new Date(start); end.setHours(23, 59, 59, 999);
+      return t >= start.getTime() && t <= end.getTime();
+    }
+    case 'weekend': {
+      // Upcoming Saturday 00:00 → Sunday 23:59 (local). If already weekend, use
+      // the current weekend.
+      const d = new Date(now);
+      const day = d.getDay(); // 0 Sun … 6 Sat
+      const sat = new Date(d);
+      const daysToSat = day === 6 ? 0 : day === 0 ? -1 : 6 - day;
+      sat.setDate(d.getDate() + daysToSat); sat.setHours(0, 0, 0, 0);
+      const sun = new Date(sat); sun.setDate(sat.getDate() + 1); sun.setHours(23, 59, 59, 999);
+      return t >= sat.getTime() && t <= sun.getTime();
+    }
+    default: return true;
+  }
 }
 
 // Region path segment. SportyBet is one network across countries; /ng and /gh
@@ -193,29 +295,35 @@ export async function fetchSportyBetSelections(opts?: {
  * detected by group + desc text (robust to id changes); the others by id.
  * Returns null if the market isn't one of the five.
  */
-function classifyPreferred(m: SbMarket): { key: PreferredMarketKey; marketLabel: string } | null {
+function classifyPreferred(m: SbMarket): { key: PreferredMarketKey; marketLabel: string; surfaceWhenLocked: boolean } | null {
   const group = ((m as any).group || '').toLowerCase();
   const desc = (m.desc || '').toLowerCase();
 
-  if (m.id === '60200') return { key: '1x2_1up', marketLabel: '1X2 - 1UP' };
-  if (m.id === '60110') return { key: 'dc_1up', marketLabel: 'Double Chance - 1UP' };
-  if (m.id === '50') return { key: 'win_either_half', marketLabel: 'Home Team to Win Either Half' };
-  if (m.id === '51') return { key: 'win_either_half', marketLabel: 'Away Team to Win Either Half' };
-
-  // Fouls — league-gated (big leagues only, e.g. EPL/LaLiga). Confirmed ids
-  // 900544 (home) / 900545 (away); group is "Teams", desc is
-  // "Home/Away Team Fouls Over/Under". We match by id first, then fall back to
-  // desc text so it keeps working if the numeric id ever shifts.
-  if (m.id === '900544') return { key: 'home_fouls', marketLabel: 'Home Team Fouls O/U' };
-  if (m.id === '900545') return { key: 'away_fouls', marketLabel: 'Away Team Fouls O/U' };
-  if (desc.includes('foul') || group === 'fouls') {
-    if (desc.includes('home')) return { key: 'home_fouls', marketLabel: 'Home Team Fouls O/U' };
-    if (desc.includes('away')) return { key: 'away_fouls', marketLabel: 'Away Team Fouls O/U' };
-    // "Fouls Over/Under" with no home/away = combined match total; treat as home
-    // bucket so it still surfaces as an available fouls market to book.
-    return { key: 'home_fouls', marketLabel: 'Match Fouls O/U' };
+  // 1) Match by explicit id first (most reliable).
+  for (const def of PREFERRED_MARKETS) {
+    if (def.ids.includes(m.id)) {
+      // For Win Either Half, refine the label to home/away from the desc.
+      const label = refineLabel(def, desc);
+      return { key: def.key, marketLabel: label, surfaceWhenLocked: !!def.surfaceWhenLocked };
+    }
+  }
+  // 2) Fall back to desc/group matcher (survives id shifts).
+  for (const def of PREFERRED_MARKETS) {
+    if (def.match && def.match(desc, group)) {
+      const label = refineLabel(def, desc);
+      return { key: def.key, marketLabel: label, surfaceWhenLocked: !!def.surfaceWhenLocked };
+    }
   }
   return null;
+}
+
+/** Sharpen a generic registry label using the market desc (e.g. Win Either Half). */
+function refineLabel(def: PreferredMarketDef, descLower: string): string {
+  if (def.key === 'win_either_half') {
+    if (descLower.includes('home')) return 'Home Team to Win Either Half';
+    if (descLower.includes('away')) return 'Away Team to Win Either Half';
+  }
+  return def.label;
 }
 
 /**
@@ -248,7 +356,7 @@ export async function fetchPreferredMarkets(opts?: {
 
   for (let page = 1; page <= maxPages; page++) {
     onProgress?.(`Scanning SportyBet page ${page}/${maxPages}…`);
-    const tournaments = await fetchPageFor(region, PREFERRED_MARKET_IDS, page, pageSize);
+    const tournaments = await fetchPageFor(region, PREFERRED_IDS_CSV, page, pageSize);
     if (tournaments.length === 0) break;
 
     for (const t of tournaments) {
@@ -265,22 +373,20 @@ export async function fetchPreferredMarkets(opts?: {
         for (const m of ev.markets || []) {
           const cls = classifyPreferred(m);
           if (!cls) continue;
-          const isFouls = cls.key === 'home_fouls' || cls.key === 'away_fouls';
+          const surfaceLocked = cls.surfaceWhenLocked;
           const marketLocked = !!(m.status && m.status !== 0);
-          // Non-fouls preferred markets: keep the tight rule (skip suspended
-          // markets) since those are broadly available anyway. Fouls: surface
-          // even when the whole market is suspended, because it typically stays
-          // locked until a few hours before kickoff and we want it pre-staged.
-          if (marketLocked && !isFouls) continue;
+          // Markets flagged surfaceWhenLocked (fouls) are shown even when the
+          // whole market is suspended, because they typically stay locked until
+          // a few hours before kickoff and we want them pre-staged. Others keep
+          // the tight rule (skip suspended) since they're broadly available.
+          if (marketLocked && !surfaceLocked) continue;
           for (const oc of m.outcomes || []) {
             const active = !!oc.isActive;
             const odds = parseFloat(oc.odds);
             const hasPrice = isFinite(odds) && odds >= 1.01;
             const locked = marketLocked || !active || !hasPrice;
-            // For fouls we keep locked lines (they carry the line label even
-            // with no live price). For everything else we require a real price.
-            if (!isFouls && locked) continue;
-            if (isFouls && !oc.desc) continue; // need at least the line label
+            if (!surfaceLocked && locked) continue;
+            if (surfaceLocked && !oc.desc) continue; // need at least the line label
             rows.push({
               key: cls.key,
               marketLabel: cls.marketLabel,
@@ -315,6 +421,143 @@ export async function fetchPreferredMarkets(opts?: {
   out.sort((a, b) => a.kickoff.getTime() - b.kickoff.getTime());
   onProgress?.(`Found ${out.length} fixture(s) offering your preferred markets.`);
   return out;
+}
+
+// ─── Fixture list (clean) + on-demand per-fixture markets ────────────────────
+
+/**
+ * Fetch a CLEAN list of SportyBet fixtures — one row per event, NO market
+ * expansion. This is the spine of the consolidated Markets tab: the user sees a
+ * fixture list and clicks a fixture to open its preferred markets on demand.
+ *
+ * We query under the preferred-market id filter so `hasPreferred` reflects
+ * whether the event carries at least one of the user's markets, but we do NOT
+ * expand them here (that's fetchFixtureMarkets on click).
+ *
+ * @param opts.region    region path (default 'ng')
+ * @param opts.maxPages   pages to pull (default 10)
+ * @param opts.pageSize   events per page (default 30)
+ * @param opts.window     time-window preset (default '' = all upcoming)
+ * @param opts.onProgress progress callback
+ */
+export async function fetchSportyBetFixtures(opts?: {
+  region?: SportyRegion;
+  maxPages?: number;
+  pageSize?: number;
+  window?: TimeWindow;
+  onProgress?: (msg: string) => void;
+}): Promise<{ fixtures: SbFixture[]; leagues: string[] }> {
+  const region = opts?.region ?? 'ng';
+  const maxPages = opts?.maxPages ?? 10;
+  const pageSize = opts?.pageSize ?? 30;
+  const win = opts?.window ?? '';
+  const onProgress = opts?.onProgress;
+
+  const now = new Date();
+  const byId = new Map<string, SbFixture>();
+
+  for (let page = 1; page <= maxPages; page++) {
+    onProgress?.(`Loading SportyBet fixtures — page ${page}/${maxPages}…`);
+    const tournaments = await fetchPageFor(region, PREFERRED_IDS_CSV, page, pageSize);
+    if (tournaments.length === 0) break;
+
+    for (const t of tournaments) {
+      for (const ev of t.events || []) {
+        const kickoff = new Date(ev.estimateStartTime);
+        if (isNaN(kickoff.getTime())) continue;
+        if (!withinWindow(kickoff, win, now)) continue;
+        if (byId.has(ev.eventId)) continue; // one row per event
+
+        const country = ev.sport?.category?.name || '';
+        const leagueName = ev.sport?.category?.tournament?.name || t.name || '';
+        const league = country ? `${country}: ${leagueName}` : leagueName;
+
+        // Does this event actually carry a preferred market? (returned under the
+        // preferred-id filter, but confirm at least one classifies.)
+        const hasPreferred = (ev.markets || []).some(m => !!classifyPreferred(m));
+
+        byId.set(ev.eventId, {
+          eventId: ev.eventId,
+          gameId: ev.gameId || ev.eventId,
+          homeTeam: ev.homeTeamName,
+          awayTeam: ev.awayTeamName,
+          country,
+          leagueName,
+          league,
+          kickoff,
+          date: `${pad2(kickoff.getDate())}/${pad2(kickoff.getMonth() + 1)}`,
+          time: `${pad2(kickoff.getHours())}:${pad2(kickoff.getMinutes())}`,
+          hasPreferred,
+        });
+      }
+    }
+  }
+
+  const fixtures = Array.from(byId.values()).sort((a, b) => a.kickoff.getTime() - b.kickoff.getTime());
+  const leagues = Array.from(new Set(fixtures.map(f => f.league))).filter(Boolean).sort();
+  onProgress?.(`Loaded ${fixtures.length} SportyBet fixture(s).`);
+  return { fixtures, leagues };
+}
+
+/**
+ * Fetch the preferred markets for ONE fixture, on demand (when the user clicks
+ * it). Uses the per-event catalog endpoint which returns the full market list,
+ * then classifies + keeps only the user's preferred markets (locked ones too,
+ * for pre-staging). Returns a PreferredFixture ready for the modal.
+ */
+export async function fetchFixtureMarkets(
+  fx: SbFixture,
+  opts?: { region?: SportyRegion; onProgress?: (msg: string) => void },
+): Promise<PreferredFixture> {
+  const region = opts?.region ?? 'ng';
+  opts?.onProgress?.('Loading markets…');
+
+  const url = `${BASE}/api/${region}/factsCenter/event?eventId=${encodeURIComponent(fx.eventId)}&productId=3`;
+  let markets: SbMarket[] = [];
+  try {
+    const res = await httpGet(url) as any;
+    const data = (res && res.data) ? res.data : (typeof res === 'string' ? (() => { try { return JSON.parse(res).data; } catch { return null; } })() : null);
+    markets = (data && Array.isArray(data.markets)) ? data.markets as SbMarket[] : [];
+  } catch {
+    markets = [];
+  }
+
+  const rows: PreferredMarketRow[] = [];
+  for (const m of markets) {
+    const cls = classifyPreferred(m);
+    if (!cls) continue;
+    const surfaceLocked = cls.surfaceWhenLocked;
+    const marketLocked = !!(m.status && m.status !== 0);
+    if (marketLocked && !surfaceLocked) continue;
+    for (const oc of m.outcomes || []) {
+      const active = !!oc.isActive;
+      const odds = parseFloat(oc.odds);
+      const hasPrice = isFinite(odds) && odds >= 1.01;
+      const locked = marketLocked || !active || !hasPrice;
+      if (!surfaceLocked && locked) continue;
+      if (surfaceLocked && !oc.desc) continue;
+      rows.push({
+        key: cls.key,
+        marketLabel: cls.marketLabel,
+        line: (oc.desc || '').trim(),
+        odds: hasPrice ? Math.round(odds * 100) / 100 : 0,
+        locked,
+      });
+    }
+  }
+  rows.sort((a, b) => Number(a.locked) - Number(b.locked));
+
+  return {
+    eventId: fx.eventId,
+    gameId: fx.gameId,
+    homeTeam: fx.homeTeam,
+    awayTeam: fx.awayTeam,
+    league: fx.league,
+    kickoff: fx.kickoff,
+    date: fx.date,
+    time: fx.time,
+    markets: rows,
+  };
 }
 
 /**
