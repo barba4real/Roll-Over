@@ -3,9 +3,9 @@ import { StakedSlip } from '../App';
 import { Chain, ParsedSelection } from '../engine/types';
 import ConfirmDialog from './ConfirmDialog';
 import { formatSlipForClipboard, copyToClipboard } from '../lib/clipboard';
-import { fetchDayFixtures } from '../engine/flashscore';
 import { isSameTeam } from '../engine/team-aliases';
 import MatchStatsModal from './MatchStatsModal';
+import { SCORE_PROVIDERS, getScoreProvider, DEFAULT_SCORE_PROVIDER, ScoreRecord } from '../engine/score-providers';
 
 interface Props {
   stakedSlips: StakedSlip[];
@@ -63,6 +63,12 @@ export default function ActiveSlips({ stakedSlips, chains, onSlipWon, onSlipLost
   const [, setTick] = useState(0);
   const [fetchingScores, setFetchingScores] = useState(false);
   const [scoreStatus, setScoreStatus] = useState<string | null>(null);
+  // Global score-provider picker (per user model: pick ONE source, then fetch).
+  const [scoreProviderId, setScoreProviderId] = useState<string>(() => {
+    try { return localStorage.getItem('rollover_score_provider') || DEFAULT_SCORE_PROVIDER; } catch { return DEFAULT_SCORE_PROVIDER; }
+  });
+  // Per-selection fetch in-flight (keyed by selectionId) for focused buttons.
+  const [rowFetching, setRowFetching] = useState<Set<string>>(new Set());
   const [statsModal, setStatsModal] = useState<{ sel: typeof stakedSlips[0]['slip']['selections'][0]; result: 'pending' | 'won' | 'lost' } | null>(null);
   const [confirm, setConfirm] = useState<{
     open: boolean;
@@ -111,134 +117,153 @@ export default function ActiveSlips({ stakedSlips, chains, onSlipWon, onSlipLost
     return false;
   }
 
-  async function handleFetchScores() {
-    if (!onUpdateScores) return;
-    setFetchingScores(true);
-    setScoreStatus('Fetching from Flashscore...');
+  // Match a selection to a normalized score record (exact alias match, then fuzzy).
+  function matchRecord(sel: ParsedSelection, records: ScoreRecord[]): ScoreRecord | undefined {
+    return records.find(r => {
+      if (isSameTeam(sel.homeTeam, r.homeTeam) && isSameTeam(sel.awayTeam, r.awayTeam)) return true;
+      return fuzzyTeamMatch(
+        sel.homeTeam.toLowerCase().replace(/\s*(fc|cf|sc|ac|cd|ud)$/i, '').trim(),
+        r.homeTeam.toLowerCase().replace(/\s*(fc|cf|sc|ac|cd|ud)$/i, '').trim()
+      ) && fuzzyTeamMatch(
+        sel.awayTeam.toLowerCase().replace(/\s*(fc|cf|sc|ac|cd|ud)$/i, '').trim(),
+        r.awayTeam.toLowerCase().replace(/\s*(fc|cf|sc|ac|cd|ud)$/i, '').trim()
+      );
+    });
+  }
+
+  // Enrich a Flashscore finished record with HT score from its detail page.
+  async function enrichHalfTime(rec: ScoreRecord): Promise<{ htHome?: number; htAway?: number }> {
+    if (rec.provider !== 'Flashscore' || !rec.matchId) return {};
     try {
       const { httpGetText } = await import('../lib/http');
+      const res = await httpGetText(`https://www.flashscore.mobi/match/${rec.matchId}/`, {});
+      if (res.text && res.text.length > 500) {
+        const htMatch = res.text.match(/<div class="detail"><b>\d+-\d+<\/b>\s*\((\d+)-(\d+),\d+-\d+\)/);
+        if (htMatch) return { htHome: parseInt(htMatch[1]), htAway: parseInt(htMatch[2]) };
+        const halfMatch = res.text.match(/1st Half:\s*<b>(\d+)-(\d+)<\/b>/);
+        if (halfMatch) return { htHome: parseInt(halfMatch[1]), htAway: parseInt(halfMatch[2]) };
+      }
+    } catch { /* ignore */ }
+    return {};
+  }
 
-      // Step 1: Collect all day offsets needed
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const datesToFetch = new Set<number>();
-
+  /**
+   * Bulk update finished scores across all staked slips, from the CHOSEN provider.
+   * (Livescore/pastscore both surface finished + running; here we settle finished.)
+   */
+  async function handleFetchScores() {
+    if (!onUpdateScores) return;
+    const provider = getScoreProvider(scoreProviderId);
+    if (!provider || !provider.fetchFinished) {
+      setScoreStatus('Selected provider has no result feed');
+      setTimeout(() => setScoreStatus(null), 3000);
+      return;
+    }
+    setFetchingScores(true);
+    setScoreStatus(`Fetching from ${provider.label}…`);
+    try {
+      // Day offsets for all started-but-unresolved selections.
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const offsets = new Set<number>();
       for (const staked of stakedSlips) {
         for (const sel of staked.slip.selections) {
-          const kickoff = new Date(sel.kickOffDateTime).getTime();
-          if (kickoff > Date.now()) continue; // skip future
-          const kickoffDate = new Date(sel.kickOffDateTime);
-          kickoffDate.setHours(0, 0, 0, 0);
-          const offset = Math.round((kickoffDate.getTime() - today.getTime()) / (24 * 60 * 60 * 1000));
-          datesToFetch.add(offset);
+          if (new Date(sel.kickOffDateTime).getTime() > Date.now()) continue;
+          const kd = new Date(sel.kickOffDateTime); kd.setHours(0, 0, 0, 0);
+          offsets.add(Math.round((kd.getTime() - today.getTime()) / 86400000));
         }
       }
-
-      if (datesToFetch.size === 0) {
+      if (offsets.size === 0) {
         setScoreStatus('No matches to update');
         setFetchingScores(false);
         setTimeout(() => setScoreStatus(null), 3000);
         return;
       }
 
-      // Step 2: Fetch Flashscore day pages to get matchIds + FT scores
-      setScoreStatus(`Loading ${datesToFetch.size} day(s)...`);
-      const allFS: { homeTeam: string; awayTeam: string; score: string; matchId: string }[] = [];
-      for (const offset of datesToFetch) {
-        try {
-          const fixtures = await fetchDayFixtures(offset);
-          for (const f of fixtures) {
-            if (f.isFinished && f.score) {
-              allFS.push({ homeTeam: f.homeTeam, awayTeam: f.awayTeam, score: f.score, matchId: f.matchId });
-            }
-          }
-        } catch {}
-      }
+      setScoreStatus(`Loading ${provider.label} — ${offsets.size} day(s)…`);
+      const records = await provider.fetchFinished(Array.from(offsets));
+      setScoreStatus(`Found ${records.length} finished. Matching…`);
 
-      setScoreStatus(`Found ${allFS.length} finished matches. Matching...`);
-
-      // Step 3: Match each selection to a Flashscore fixture
-      type ScoreUpdate = { slipId: string; selectionId: string; matchId: string; ftHome: number; ftAway: number };
-      const matched: ScoreUpdate[] = [];
-
+      const updates: { slipId: string; selectionId: string; score: { home: number; away: number; htHome?: number; htAway?: number } }[] = [];
       for (const staked of stakedSlips) {
         for (const sel of staked.slip.selections) {
-          const kickoff = new Date(sel.kickOffDateTime).getTime();
-          if (kickoff > Date.now()) continue;
-          // Skip if already has HT (fully resolved)
-          if (sel.score?.htHome !== undefined) continue;
-
-          const fsMatch = allFS.find(f => {
-            if (isSameTeam(sel.homeTeam, f.homeTeam) && isSameTeam(sel.awayTeam, f.awayTeam)) return true;
-            return fuzzyTeamMatch(
-              sel.homeTeam.toLowerCase().replace(/\s*(fc|cf|sc|ac|cd|ud)$/i, '').trim(),
-              f.homeTeam.toLowerCase().replace(/\s*(fc|cf|sc|ac|cd|ud)$/i, '').trim()
-            ) && fuzzyTeamMatch(
-              sel.awayTeam.toLowerCase().replace(/\s*(fc|cf|sc|ac|cd|ud)$/i, '').trim(),
-              f.awayTeam.toLowerCase().replace(/\s*(fc|cf|sc|ac|cd|ud)$/i, '').trim()
-            );
+          if (new Date(sel.kickOffDateTime).getTime() > Date.now()) continue;
+          if (sel.score?.htHome !== undefined) continue; // already fully resolved
+          const rec = matchRecord(sel, records);
+          if (!rec || rec.homeScore === null || rec.awayScore === null) continue;
+          const ht = await enrichHalfTime(rec);
+          updates.push({
+            slipId: staked.slip.id,
+            selectionId: sel.id,
+            score: { home: rec.homeScore, away: rec.awayScore, ...ht },
           });
-
-          if (fsMatch) {
-            const parts = fsMatch.score.split('-').map(Number);
-            if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-              matched.push({ slipId: staked.slip.id, selectionId: sel.id, matchId: fsMatch.matchId, ftHome: parts[0], ftAway: parts[1] });
-            }
-          }
         }
       }
 
-      if (matched.length === 0) {
-        setScoreStatus('No matches found on Flashscore');
-        setFetchingScores(false);
-        setTimeout(() => setScoreStatus(null), 4000);
-        return;
-      }
-
-      // Step 4: For each matched fixture, fetch the detail page to get HT score
-      setScoreStatus(`Fetching HT for ${matched.length} matches...`);
-      const finalUpdates: { slipId: string; selectionId: string; score: { home: number; away: number; htHome?: number; htAway?: number } }[] = [];
-
-      for (const m of matched) {
-        let htHome: number | undefined;
-        let htAway: number | undefined;
-
-        try {
-          const res = await httpGetText(`https://www.flashscore.mobi/match/${m.matchId}/`, {});
-          if (res.text && res.text.length > 500) {
-            // Try format: <b>3-0</b>  (2-0,1-0) — parentheses contain (HT, 2ndHalf)
-            const htMatch = res.text.match(/<div class="detail"><b>\d+-\d+<\/b>\s*\((\d+)-(\d+),\d+-\d+\)/);
-            if (htMatch) {
-              htHome = parseInt(htMatch[1]);
-              htAway = parseInt(htMatch[2]);
-            } else {
-              // Try: <h4>1st Half: <b>0-0</b></h4>
-              const halfMatch = res.text.match(/1st Half:\s*<b>(\d+)-(\d+)<\/b>/);
-              if (halfMatch) {
-                htHome = parseInt(halfMatch[1]);
-                htAway = parseInt(halfMatch[2]);
-              }
-            }
-          }
-        } catch {}
-
-        finalUpdates.push({
-          slipId: m.slipId,
-          selectionId: m.selectionId,
-          score: { home: m.ftHome, away: m.ftAway, htHome, htAway },
-        });
-      }
-
-      if (finalUpdates.length > 0) {
-        onUpdateScores(finalUpdates);
-        setScoreStatus(`Updated ${finalUpdates.length} match${finalUpdates.length > 1 ? 'es' : ''}`);
+      if (updates.length === 0) {
+        setScoreStatus(`No matches found on ${provider.label}`);
+      } else {
+        onUpdateScores(updates);
+        setScoreStatus(`Updated ${updates.length} match${updates.length > 1 ? 'es' : ''} from ${provider.label}`);
       }
     } catch (e) {
       setScoreStatus('Fetch failed');
-      console.error('[LiveScores]', e);
+      console.error('[Scores]', e);
     }
     setFetchingScores(false);
     setTimeout(() => setScoreStatus(null), 4000);
+  }
+
+  /**
+   * Focused fetch for ONE selection from the chosen provider. `mode` decides
+   * which feed: 'live' for a running match, 'past' for a finished result. This
+   * powers the per-row Livescore / Fetch-result buttons.
+   */
+  async function fetchOneSelection(
+    slipId: string,
+    sel: ParsedSelection,
+    mode: 'live' | 'past',
+  ) {
+    if (!onUpdateScores) return;
+    const provider = getScoreProvider(scoreProviderId);
+    if (!provider) return;
+    const feed = mode === 'live' ? provider.fetchLive : provider.fetchFinished;
+    if (!feed) {
+      setScoreStatus(`${provider.label} has no ${mode === 'live' ? 'livescore' : 'result'} feed`);
+      setTimeout(() => setScoreStatus(null), 3000);
+      return;
+    }
+    setRowFetching(prev => new Set(prev).add(sel.id));
+    setScoreStatus(`${mode === 'live' ? 'Livescore' : 'Result'} · ${provider.label}…`);
+    try {
+      // For past: query the fixture's own day; for live: today.
+      let records: ScoreRecord[];
+      if (mode === 'live') {
+        records = await (provider.fetchLive as () => Promise<ScoreRecord[]>)();
+      } else {
+        const today = new Date(); today.setHours(0, 0, 0, 0);
+        const kd = new Date(sel.kickOffDateTime); kd.setHours(0, 0, 0, 0);
+        const off = Math.round((kd.getTime() - today.getTime()) / 86400000);
+        records = await (provider.fetchFinished as (o: number[]) => Promise<ScoreRecord[]>)([off]);
+      }
+      const rec = matchRecord(sel, records);
+      if (!rec || rec.homeScore === null || rec.awayScore === null) {
+        setScoreStatus(`No ${mode === 'live' ? 'live score' : 'result'} found on ${provider.label}`);
+      } else {
+        const ht = mode === 'past' ? await enrichHalfTime(rec) : {};
+        onUpdateScores([{ slipId, selectionId: sel.id, score: { home: rec.homeScore, away: rec.awayScore, ...ht } }]);
+        setScoreStatus(`${sel.homeTeam} ${rec.homeScore}-${rec.awayScore} ${sel.awayTeam} · ${provider.label}`);
+      }
+    } catch (e) {
+      setScoreStatus('Fetch failed');
+      console.error('[Scores:row]', e);
+    }
+    setRowFetching(prev => { const n = new Set(prev); n.delete(sel.id); return n; });
+    setTimeout(() => setScoreStatus(null), 4000);
+  }
+
+  function persistProvider(id: string) {
+    setScoreProviderId(id);
+    try { localStorage.setItem('rollover_score_provider', id); } catch { /* ignore */ }
   }
 
   function askConfirm(title: string, message: string, action: () => void, variant: 'danger' | 'warning' | 'info' = 'danger') {
@@ -287,13 +312,25 @@ export default function ActiveSlips({ stakedSlips, chains, onSlipWon, onSlipLost
           )}
         </h2>
         <div className="flex items-center gap-2">
-          {scoreStatus && <span className="text-[10px] text-blue-400">{scoreStatus}</span>}
+          {scoreStatus && <span className="text-[10px] text-blue-400 max-w-[16rem] truncate" title={scoreStatus}>{scoreStatus}</span>}
+          {/* Global score-provider picker — common to all rows. Pick one source. */}
+          <label className="flex items-center gap-1 text-[10px] text-gray-400" title="Score source. Fixtures come from SportyBet; scores/results come from the provider you pick here.">
+            Scores:
+            <select
+              value={scoreProviderId}
+              onChange={(e) => persistProvider(e.target.value)}
+              className="px-1.5 py-1 bg-gray-800 border border-gray-600 rounded text-[10px] text-gray-300"
+            >
+              {SCORE_PROVIDERS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+            </select>
+          </label>
           <button
             onClick={handleFetchScores}
             disabled={fetchingScores}
             className="px-2 py-1 bg-indigo-700 hover:bg-indigo-600 disabled:bg-gray-600 rounded text-[10px] font-medium text-white"
+            title="Update finished results for all staked slips from the selected provider"
           >
-            {fetchingScores ? 'Fetching...' : 'Live Scores'}
+            {fetchingScores ? 'Fetching...' : 'Update all'}
           </button>
         </div>
       </div>
@@ -528,6 +565,27 @@ export default function ActiveSlips({ stakedSlips, chains, onSlipWon, onSlipLost
                                 )}
                                 {sel.score && (
                                   <span className="ml-1 text-[10px] font-bold text-blue-400">FT {sel.score.home}-{sel.score.away}</span>
+                                )}
+                                {/* Focused per-fixture score buttons (from the chosen provider). */}
+                                {status === 'live' && (
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); fetchOneSelection(staked.slip.id, sel, 'live'); }}
+                                    disabled={rowFetching.has(sel.id)}
+                                    className="ml-1.5 px-1 py-0.5 bg-green-900 hover:bg-green-800 disabled:opacity-50 rounded text-[9px] text-green-300 align-middle"
+                                    title="Fetch live score for this running match from the selected provider"
+                                  >
+                                    {rowFetching.has(sel.id) ? '…' : '⟳ live'}
+                                  </button>
+                                )}
+                                {status === 'ended' && !sel.score && (
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); fetchOneSelection(staked.slip.id, sel, 'past'); }}
+                                    disabled={rowFetching.has(sel.id)}
+                                    className="ml-1.5 px-1 py-0.5 bg-yellow-900 hover:bg-yellow-800 disabled:opacity-50 rounded text-[9px] text-yellow-300 align-middle"
+                                    title="This match ended but has no result — fetch it from the selected provider"
+                                  >
+                                    {rowFetching.has(sel.id) ? '…' : '⟳ result'}
+                                  </button>
                                 )}
                               </div>
                             </td>
