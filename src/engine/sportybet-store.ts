@@ -209,22 +209,21 @@ export async function hydrateFixtures(): Promise<void> {
  * so a double-click or two tabs mounting at once won't double-fetch.
  */
 export async function pullFixtures(opts?: {
-  window?: TimeWindow;
   region?: 'ng' | 'gh' | 'ke' | 'ug' | 'tz' | 'zm';
   maxPages?: number;
   pageSize?: number;
   force?: boolean;
 }): Promise<void> {
-  const win = opts?.window ?? state.window ?? '';
-
-  // Reuse fresh data unless forced or the window changed.
-  if (!opts?.force && isFixtureDataFresh() && win === state.window && state.fixtures.length > 0) {
-    return;
+  // The store ALWAYS holds the full "all upcoming" slate (window ''). Time-window
+  // filtering (Next 3h/6h/Today/…) is done in-memory by the UI over this cached
+  // slate — NEVER by re-pulling. So switching windows is instant and offline.
+  if (!opts?.force && isFixtureDataFresh() && state.fixtures.length > 0) {
+    return; // fresh cache — no network needed
   }
   if (inFlight) return inFlight;
 
   inFlight = (async () => {
-    setState({ loading: true, error: null, progress: 'Loading SportyBet fixtures…', window: win });
+    setState({ loading: true, error: null, progress: 'Loading SportyBet fixtures…', window: '' });
     try {
       const res = await fetchSportyBetFixtures({
         region: opts?.region ?? 'ng',
@@ -233,7 +232,7 @@ export async function pullFixtures(opts?: {
         // is dropped by an arbitrary depth cap. Callers may override to go shallow.
         maxPages: opts?.maxPages ?? 200,
         pageSize: opts?.pageSize ?? 30,
-        window: win,
+        window: '', // ALWAYS pull the full slate; UI filters windows locally
         onProgress: (m) => setState({ progress: m }),
       });
       setState({
@@ -252,6 +251,19 @@ export async function pullFixtures(opts?: {
   })();
 
   return inFlight;
+}
+
+/**
+ * Load-time sync: hydrate the cached slate from SQLite immediately (so the UI
+ * shows fixtures instantly from local storage), then, if the cache is stale or
+ * empty, refresh from the network in the BACKGROUND without blocking the UI.
+ * Call this once when the app / a fixture tab first mounts.
+ */
+export async function syncFixturesOnLoad(): Promise<void> {
+  await hydrateFixtures();                 // instant: show whatever is in local storage
+  if (!isFixtureDataFresh() || state.fixtures.length === 0) {
+    void pullFixtures();                   // background refresh; UI already usable
+  }
 }
 
 /** Clear the store + cached row (e.g. a manual "reset" action). */
@@ -273,9 +285,8 @@ export async function clearFixtureStore(): Promise<void> {
 export function useFixtureStore(): SbStoreState {
   const [snap, setSnap] = useReactState<SbStoreState>(getFixtureState);
   useEffect(() => {
-    if (!hydrated && state.fixtures.length === 0) {
-      void hydrateFixtures();
-    }
+    // Load from local storage first, then background-refresh if stale/empty.
+    void syncFixturesOnLoad();
     const unsub = subscribeFixtures(setSnap);
     return unsub;
   }, []);

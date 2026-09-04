@@ -18,6 +18,7 @@ import { ParsedSelection } from '../engine/types';
 import {
   fetchFixtureMarkets,
   preferredRowToSelection,
+  withinWindow,
   SbFixture,
   PreferredFixture,
   TimeWindow,
@@ -36,8 +37,10 @@ export default function PreferredMarkets({ onImport }: Props) {
   const leagues = store.leagues;
   const loading = store.loading;
   const status = store.progress || store.error;
-  const win = store.window;
 
+  // Window is a LOCAL, in-memory filter over the cached full slate — switching
+  // it never re-pulls. Default to the full "all upcoming" view.
+  const [win, setWin] = useState<TimeWindow>('');
   const [leagueFilter, setLeagueFilter] = useState<string>('');
   // Collapsed league groups (by league name). Default: all expanded.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -49,15 +52,9 @@ export default function PreferredMarkets({ onImport }: Props) {
   const [imported, setImported] = useState<Set<string>>(new Set());
 
   function handleScan() {
-    // Force a fresh, FULL pull into the shared store (updates Scout too). No
-    // page cap — the store exhausts the SportyBet feed so no showcased league
-    // is left out.
-    void pullFixtures({ window: win, force: true });
-  }
-
-  function setWin(w: TimeWindow) {
-    // Changing the window triggers a shared re-pull for that window.
-    void pullFixtures({ window: w });
+    // Manual refresh: force a fresh FULL pull into the shared store (updates
+    // Scout too). Windows are filtered locally, so this is the only network call.
+    void pullFixtures({ force: true });
   }
 
   function toggleCollapse(league: string) {
@@ -72,13 +69,14 @@ export default function PreferredMarkets({ onImport }: Props) {
     setCollapsed(allCollapsed(leaguesShown) ? new Set() : new Set(leaguesShown));
   }
 
-  // Markets = the FULL SportyBet catalog (every showcased league). No preferred-
-  // market gating here — that lives in the dedicated Preferred + Fouls tabs.
+  // Markets = the FULL SportyBet catalog (every showcased league). Time-window
+  // (Next 3h/6h/…) is applied IN-MEMORY over the cached slate — no re-pull.
   const shown = useMemo(() => {
-    let list = fixtures;
+    const now = new Date();
+    let list = win ? fixtures.filter(f => withinWindow(f.kickoff, win, now)) : fixtures;
     if (leagueFilter) list = list.filter(f => f.league === leagueFilter);
     return list;
-  }, [fixtures, leagueFilter]);
+  }, [fixtures, leagueFilter, win]);
 
   // Group shown fixtures by league for a tidy list
   const grouped = useMemo(() => {
@@ -245,9 +243,21 @@ export default function PreferredMarkets({ onImport }: Props) {
         })}
       </div>
 
-      {!loading && fixtures.length === 0 && !status && (
+      {loading && fixtures.length === 0 && (
+        <div className="text-center text-gray-500 text-xs py-8 animate-pulse">
+          Syncing SportyBet fixtures…
+        </div>
+      )}
+      {!loading && fixtures.length === 0 && (
         <div className="text-center text-gray-600 text-xs py-8">
-          Click "Load fixtures" to pull SportyBet's showcased games.
+          No fixtures cached yet. Click "Load fixtures" to sync SportyBet's showcased games.
+        </div>
+      )}
+      {/* Window filter matched nothing, but we DO have cached fixtures */}
+      {!loading && fixtures.length > 0 && shown.length === 0 && (
+        <div className="text-center text-gray-500 text-xs py-8">
+          No fixtures in this window. {fixtures.length} cached across other times —
+          <button onClick={() => setWin('')} className="ml-1 text-blue-400 hover:underline">show all upcoming</button>.
         </div>
       )}
 

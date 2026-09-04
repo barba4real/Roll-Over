@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { ScoutedMatch, PickSuggestion } from '../engine/match-scout';
-import { TimeWindow, TIME_WINDOWS } from '../engine/sportybet';
+import { TimeWindow, TIME_WINDOWS, withinWindow } from '../engine/sportybet';
 import { pullFixtures, getFixtureState } from '../engine/sportybet-store';
 import { setFootballDataKey } from '../engine/football-data-org';
 import { setSportmonksToken } from '../engine/sportmonks';
@@ -376,8 +376,12 @@ export default function MatchScout({ onAddPick }: Props) {
       // Every scouted fixture comes from SportyBet — the book we actually play.
       // Historical DB (predictMatch) + Flashscore matchId caching remain as
       // ENRICHMENT feeders only, layered onto the SportyBet fixture list.
-      await pullFixtures({ window: win, maxPages: 12, force: true });
-      const sbResult = getFixtureState();
+      await pullFixtures({ force: true });
+      const sbState = getFixtureState();
+      // Window is filtered locally over the cached full slate (no per-window pull).
+      const sbResult = {
+        fixtures: win ? sbState.fixtures.filter(f => withinWindow(f.kickoff, win, new Date())) : sbState.fixtures,
+      };
       setSyncMessage(null);
 
       if (signal.aborted) return;
