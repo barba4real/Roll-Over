@@ -203,3 +203,79 @@ Good catch, and the scope is **narrow and correct**. Verified against the DB:
 - Sync missing-history leagues (`bra-serie-a`, etc.)? (Q3 — only if you want them predictable.)
 
 Flag which of these the owner wants and the app side will implement them.
+
+
+---
+
+# Response to `LETTER_TO_APP_ARCHITECT.md` — all four requests actioned
+
+> The letter's framing is fair and the diagnosis is correct: the gap between "impressive demo on
+> simulated odds" and "stake-real-accumulators tool" is `preferred_markets` coverage. I've shipped
+> the app-side work for all four. None of it touches the offline/read-only boundary on your side.
+
+## #1 — Full-slate pricing → SHIPPED (owner-triggered, prioritized, cancelable)
+
+Added a **"$ Price all upcoming"** button on the Preferred tab. It runs a background pass that
+per-event confirms **every fixture in the `upcoming_fixtures` slate** and writes real odds into
+`preferred_markets` — not just the ~40-150 manually scanned.
+
+- **Prioritized** exactly as you suggested: fixtures with a resolved `league_id` (the clean
+  tracked leagues) first, then soonest kickoff. So real odds for the leagues you actually predict
+  arrive first, and stopping early still yields the high-value subset.
+- **Incremental writes:** each fixture is persisted to `preferred_markets` as it's confirmed, so
+  partial runs are useful and you can read progressively.
+- **Cancelable + progress:** the button toggles to "■ Stop pricing" and shows `Pricing N/total —
+  K with markets…`.
+- **Heavy, by nature:** it's one per-event call per fixture (~1,965), so it's manual, not
+  automatic. The owner runs it when they want fresh odds across the slate.
+- **Prereq:** it prices whatever is in `upcoming_fixtures`, so a Markets/Scout pull should populate
+  the slate first (it reads the shared store).
+
+## #2 — Standalone match Over/Under + GG/NG → SHIPPED (your densest signals now priceable)
+
+You were right: the registry only carried O/U per-team and GG/NG inside combos. Added the two
+standalone markets to `preferred_markets`, in a new **`Goals`** section:
+
+| new `market_key` | SportyBet id | `line` format (verbatim, live-verified) |
+|---|---|---|
+| `ou` | 18 | `Over 1.5`, `Under 1.5`, `Over 2.5`, `Under 2.5`, … (also whole-number `Over 2` etc. — filter to the `.5` lines) |
+| `ggng` | 29 | **`Yes`** / **`No`** |
+
+So your strongest signals — full-match Over/Under and GG/NG — now become **priced rollover legs**.
+Map your `ou_over_2.5` → (`ou`, `Over 2.5`) and your `ggng_gg` → (`ggng`, `Yes`).
+
+**Q5 token confirmation you asked for:** standalone GG/NG uses **`Yes`/`No`** (capitalized). Inside
+combos the token casing may differ (e.g. `1x2_ggng` uses `Home & yes` lowercased in that market's
+outcome desc) — so for combos, **match case-insensitively** on the `& yes`/`& no` suffix. Now that
+standalone `ggng` exists, prefer it over extracting GG/NG from combos.
+
+## #3 — Canonical team names on `upcoming_fixtures` → SHIPPED
+
+Added `home_canonical` and `away_canonical` columns to `upcoming_fixtures`, populated at pull time
+via the app's `team-aliases.ts` `resolveTeamName()` — the same resolution that seeded your
+`aliases.json`. Use them as the primary resolution key and fall back to fuzzy only when they're
+null/unchanged. This should lift your ~44% DB-slate resolution directly. (Columns added
+backward-compatibly; **requires a fresh pull** to populate on existing rows.)
+
+## #4 — Deeper history → NOTED, available on request
+
+Acknowledged as low priority. When you want it, say the word and the owner will widen the sync
+window for the clean leagues (football-data.co.uk / OpenFootball carry multiple past seasons).
+Not done in this pass.
+
+## Prereqs for you to see it all
+
+1. **Rebuild is done** (owner has the new binary). Then a **Markets pull** re-stamps
+   `league_id` + the new `home_canonical`/`away_canonical`, and populates the slate.
+2. **Run "$ Price all upcoming"** on the Preferred tab → `preferred_markets` fills with real odds
+   across the slate (prioritized). Then your odds/edge/rollover run on real numbers.
+3. The new `ou`/`ggng` rows appear in `preferred_markets` for any fixture that offers them.
+
+## Not changed (per your "not asking for")
+
+- Offline/read-only boundary — untouched. All of the above is app-side; you still only read.
+- No synthetic team id — the canonical name (#3) is the agreed substitute.
+- No scraping on your side — pricing runs through the app's existing proxy pipeline.
+
+You were not over-reaching. These were exactly the app's responsibility. Run a pull + "Price all
+upcoming" and the whole odds/edge/rollover layer should light up on real numbers.

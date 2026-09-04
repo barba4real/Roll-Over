@@ -23,11 +23,12 @@ import {
   TimeWindow,
   TIME_WINDOWS,
 } from '../engine/sportybet';
-import { savePreferredMarkets } from '../engine/preferred-markets-store';
+import { savePreferredMarkets, priceAllUpcoming, cancelPricing } from '../engine/preferred-markets-store';
 
-const SECTION_ORDER: PreferredSection[] = ['Early-Payout', 'Combos', 'Halves', 'Corners', 'Team Totals', 'Other'];
+const SECTION_ORDER: PreferredSection[] = ['Goals', 'Early-Payout', 'Combos', 'Halves', 'Corners', 'Team Totals', 'Other'];
 
 const SECTION_COLOR: Record<PreferredSection, string> = {
+  'Goals': 'border-teal-800 bg-teal-900/30 text-teal-300',
   'Early-Payout': 'border-green-800 bg-green-900/30 text-green-300',
   'Combos': 'border-emerald-800 bg-emerald-900/30 text-emerald-300',
   'Halves': 'border-blue-800 bg-blue-900/30 text-blue-300',
@@ -77,6 +78,21 @@ export default function PreferredPicks({ onImport }: Props) {
   const [scannedAt, setScannedAt] = useState<number | null>(() => loadCache()?.scannedAt ?? null);
   const [imported, setImported] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [pricing, setPricing] = useState(false);
+  const [priceMsg, setPriceMsg] = useState('');
+
+  async function priceAll() {
+    if (pricing) { cancelPricing(); return; }
+    setPricing(true);
+    setPriceMsg('Starting full-slate pricing…');
+    try {
+      await priceAllUpcoming({ region: 'ng', onProgress: (m) => setPriceMsg(m) });
+    } catch (e: any) {
+      setPriceMsg(`Pricing failed: ${e?.message || 'unknown'}`);
+    } finally {
+      setPricing(false);
+    }
+  }
 
   // ── Filters (all client-side over the scanned set) ──
   const [fSections, setFSections] = useState<Set<PreferredSection>>(new Set());
@@ -265,13 +281,22 @@ export default function PreferredPicks({ onImport }: Props) {
           </select>
           <button
             onClick={scan}
-            disabled={loading}
+            disabled={loading || pricing}
             className="px-3 py-1.5 bg-green-700 hover:bg-green-600 disabled:bg-gray-600 rounded text-xs font-medium text-white"
           >
             {loading ? 'Scanning…' : fixtures.length > 0 ? '⟳ Re-scan' : 'Scan'}
           </button>
+          <button
+            onClick={priceAll}
+            disabled={loading}
+            className={`px-3 py-1.5 rounded text-xs font-medium text-white ${pricing ? 'bg-red-700 hover:bg-red-600' : 'bg-indigo-700 hover:bg-indigo-600'}`}
+            title="Fetch real SportyBet odds for the whole upcoming slate into the DB (heavy; prioritizes tracked leagues + soonest kickoff). Powers the predictor's real-odds value + rollover."
+          >
+            {pricing ? '■ Stop pricing' : '$ Price all upcoming'}
+          </button>
         </div>
       </div>
+      {priceMsg && <div className="mb-2 text-[11px] text-indigo-300">{priceMsg}</div>}
 
       {/* ── Filters ── */}
       {fixtures.length > 0 && (

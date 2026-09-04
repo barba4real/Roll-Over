@@ -12,7 +12,8 @@
  */
 
 import { getDb } from '../lib/database';
-import { ConfirmedFixture } from './sportybet';
+import { ConfirmedFixture, fetchFixtureMarkets, sectionForKey as sectionForKeyFn, SbFixture } from './sportybet';
+import { getFixtureState } from './sportybet-store';
 
 async function ensureTable() {
   const db = await getDb();
@@ -72,4 +73,59 @@ export async function savePreferredMarkets(fixtures: ConfirmedFixture[], section
   } catch {
     // best-effort
   }
+}
+
+// ─── Full-slate pricing (owner-triggered, cancelable) ───────────────────────
+
+let priceAborted = false;
+/** Cancel an in-progress full-slate pricing run. */
+export function cancelPricing() { priceAborted = true; }
+
+/**
+ * Price the FULL upcoming slate into preferred_markets — one per-event call per
+ * fixture (heavy). Prioritizes fixtures with a resolved league_id (the clean
+ * tracked leagues), then soonest kickoff, so real odds arrive fast even if the
+ * owner stops early. Writes incrementally (each fixture persisted as confirmed),
+ * reports progress, and is cancelable via cancelPricing().
+ *
+ * Returns the number of fixtures priced.
+ */
+export async function priceAllUpcoming(opts?: {
+  region?: 'ng' | 'gh' | 'ke' | 'ug' | 'tz' | 'zm';
+  onProgress?: (msg: string, done: number, total: number) => void;
+}): Promise<number> {
+  priceAborted = false;
+  const region = opts?.region ?? 'ng';
+  const state = getFixtureState();
+  // Prioritize: tracked leagues (leagueId set) first, then soonest kickoff.
+  const slate: SbFixture[] = [...state.fixtures].sort((a, b) => {
+    const al = a.leagueId ? 0 : 1, bl = b.leagueId ? 0 : 1;
+    if (al !== bl) return al - bl;
+    return a.kickoff.getTime() - b.kickoff.getTime();
+  });
+
+  const total = slate.length;
+  let done = 0, priced = 0;
+  for (const fx of slate) {
+    if (priceAborted) break;
+    done++;
+    opts?.onProgress?.(`Pricing ${done}/${total} — ${priced} with markets…`, done, total);
+    let pf;
+    try {
+      pf = await fetchFixtureMarkets(fx, { region });
+    } catch {
+      continue;
+    }
+    if (!pf.markets || pf.markets.length === 0) continue;
+    // Reuse the single-fixture writer (delete+reinsert for this event).
+    const confirmed: ConfirmedFixture = {
+      eventId: fx.eventId, gameId: fx.gameId, homeTeam: fx.homeTeam, awayTeam: fx.awayTeam,
+      league: fx.league, leagueName: fx.leagueName, kickoff: fx.kickoff, date: fx.date,
+      time: fx.time, markets: pf.markets, anyOpen: pf.markets.some(r => !r.locked),
+    };
+    await savePreferredMarkets([confirmed], sectionForKeyFn);
+    priced++;
+  }
+  opts?.onProgress?.(`Done — priced ${priced} of ${total} fixture(s).`, done, total);
+  return priced;
 }

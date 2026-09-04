@@ -105,6 +105,8 @@ async function ensureTable() {
       league_name TEXT,
       league TEXT,
       league_id TEXT,
+      home_canonical TEXT,
+      away_canonical TEXT,
       kickoff_ms INTEGER,
       date TEXT,
       time TEXT,
@@ -115,9 +117,11 @@ async function ensureTable() {
     )
   `);
   await db.execute(`CREATE INDEX IF NOT EXISTS idx_upcoming_kickoff ON upcoming_fixtures(kickoff_ms)`);
-  // Backward-compat: add league_id to a pre-existing table (ignore if present).
-  // Must happen BEFORE the league_id index so the index doesn't fail on a missing column.
+  // Backward-compat: add columns to a pre-existing table (ignore if present).
+  // Must happen BEFORE any index that references them.
   try { await db.execute(`ALTER TABLE upcoming_fixtures ADD COLUMN league_id TEXT`); } catch {}
+  try { await db.execute(`ALTER TABLE upcoming_fixtures ADD COLUMN home_canonical TEXT`); } catch {}
+  try { await db.execute(`ALTER TABLE upcoming_fixtures ADD COLUMN away_canonical TEXT`); } catch {}
   try { await db.execute(`CREATE INDEX IF NOT EXISTS idx_upcoming_league_id ON upcoming_fixtures(league_id)`); } catch {}
 }
 
@@ -155,19 +159,22 @@ async function persist() {
       await db.execute(
         `INSERT OR IGNORE INTO upcoming_fixtures
            (event_id, game_id, home_team, away_team, country, league_name, league, league_id,
+            home_canonical, away_canonical,
             kickoff_ms, date, time, has_preferred, window, first_seen, last_seen)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$16)`,
         [
           f.eventId, f.gameId, f.homeTeam, f.awayTeam, f.country, f.leagueName, f.league, f.leagueId ?? null,
+          f.homeCanonical ?? null, f.awayCanonical ?? null,
           kickoffMs, f.date, f.time, f.hasPreferred ? 1 : 0, state.window, now,
         ]
       );
       await db.execute(
         `UPDATE upcoming_fixtures
            SET kickoff_ms = $2, has_preferred = $3, window = $4, last_seen = $5,
-               date = $6, time = $7, league = $8, league_name = $9, league_id = $10
+               date = $6, time = $7, league = $8, league_name = $9, league_id = $10,
+               home_canonical = $11, away_canonical = $12
          WHERE event_id = $1`,
-        [f.eventId, kickoffMs, f.hasPreferred ? 1 : 0, state.window, now, f.date, f.time, f.league, f.leagueName, f.leagueId ?? null]
+        [f.eventId, kickoffMs, f.hasPreferred ? 1 : 0, state.window, now, f.date, f.time, f.league, f.leagueName, f.leagueId ?? null, f.homeCanonical ?? null, f.awayCanonical ?? null]
       );
     }
 

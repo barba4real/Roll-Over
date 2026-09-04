@@ -26,6 +26,7 @@
 import { httpGet } from '../lib/http';
 import { ParsedSelection } from './types';
 import { resolveSportyLeagueId } from './league-registry';
+import { resolveTeamName } from './team-aliases';
 
 // Market IDs we care about (comma-joined in the query). Covers the user's
 // staking vocabulary: 1X2, O/U, Double Chance, GG/NG, DNB, Odd/Even, Handicap,
@@ -49,6 +50,8 @@ const MARKET_IDS = '1,10,11,18,26,29,36,14,60100,60200';
 // The user's signature markets, mirrored from their SportyBet ⭐ favorites.
 // Each key is stable; ids are confirmed from SportyBet's per-event catalog.
 export type PreferredMarketKey =
+  // Goals (standalone, densest signals)
+  | 'ou' | 'ggng'
   // Early-payout
   | '1x2_1up' | '1x2_2up' | 'dc_1up'
   // Combos
@@ -66,7 +69,7 @@ export type PreferredMarketKey =
   | 'home_fouls' | 'away_fouls';
 
 // Which section of the Preferred tab a market belongs to.
-export type PreferredSection = 'Early-Payout' | 'Combos' | 'Halves' | 'Corners' | 'Team Totals' | 'Other' | 'Fouls';
+export type PreferredSection = 'Goals' | 'Early-Payout' | 'Combos' | 'Halves' | 'Corners' | 'Team Totals' | 'Other' | 'Fouls';
 
 // ─── Preferred-market registry (single place to add a new preferred market) ──
 // To add a market later: append one entry here with its SportyBet market id(s),
@@ -85,6 +88,11 @@ export interface PreferredMarketDef {
 }
 
 export const PREFERRED_MARKETS: PreferredMarketDef[] = [
+  // ── Goals ── (standalone match Over/Under + GG/NG — the predictor's densest,
+  //             highest-confidence signals; priced so they can be rollover legs)
+  { key: 'ou', label: 'Match Over/Under', section: 'Goals', ids: ['18'] },
+  { key: 'ggng', label: 'GG/NG (Both Teams to Score)', section: 'Goals', ids: ['29'] },
+
   // ── Early-Payout ──
   { key: '1x2_1up', label: '1X2 - 1UP', section: 'Early-Payout', ids: ['60200'] },
   { key: '1x2_2up', label: '1X2 - 2UP', section: 'Early-Payout', ids: ['60100'] },
@@ -183,6 +191,8 @@ export interface SbFixture {
   leagueId: string | null;         // resolved registry slug (e.g. "esp-la-liga")
                                    // matching historical_matches.league_id, or null
                                    // for long-tail leagues we don't track
+  homeCanonical: string;           // app's canonical team name (team-aliases) — a
+  awayCanonical: string;           // resolution hint for the offline predictor
   kickoff: Date;
   date: string;                    // DD/MM
   time: string;                    // HH:MM
@@ -580,6 +590,8 @@ export async function fetchSportyBetFixtures(opts?: {
             leagueName,
             league,
             leagueId: resolveSportyLeagueId(country, leagueName),
+            homeCanonical: resolveTeamName(ev.homeTeamName || ''),
+            awayCanonical: resolveTeamName(ev.awayTeamName || ''),
             kickoff,
             date: `${pad2(kickoff.getDate())}/${pad2(kickoff.getMonth() + 1)}`,
             time: `${pad2(kickoff.getHours())}:${pad2(kickoff.getMinutes())}`,
@@ -788,6 +800,8 @@ export async function confirmFoulsFixtures(opts?: {
  */
 export function preferredRowToSelection(fx: PreferredFixture, row: PreferredMarketRow): ParsedSelection {
   const marketType: ParsedSelection['marketType'] =
+    row.key === 'ou' ? 'over_under' :
+    row.key === 'ggng' ? 'gg_ng' :
     (row.key === '1x2_1up' || row.key === '1x2_2up' || row.key === 'ten_min_1x2') ? '1x2' :
     (row.key === 'dc_1up' || row.key === 'fh_dc') ? 'double_chance' :
     (row.key === 'home_fouls' || row.key === 'away_fouls') ? 'fouls' :
