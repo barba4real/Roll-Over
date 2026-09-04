@@ -77,6 +77,38 @@ export async function savePreferredMarkets(fixtures: ConfirmedFixture[], section
 
 // ─── Full-slate pricing (owner-triggered, cancelable) ───────────────────────
 
+/** Reconstruct minimal SbFixtures from the persisted upcoming_fixtures table. */
+async function loadUpcomingFromDb(): Promise<SbFixture[]> {
+  try {
+    const db = await getDb();
+    const rows = await db.select<any[]>(
+      `SELECT event_id, game_id, home_team, away_team, country, league_name, league,
+              league_id, kickoff_ms, date, time, has_preferred
+       FROM upcoming_fixtures
+       WHERE kickoff_ms IS NULL OR kickoff_ms >= $1`,
+      [Date.now() - 6 * 60 * 60 * 1000], // include just-started/recent too
+    );
+    return rows.map((r): SbFixture => ({
+      eventId: r.event_id,
+      gameId: r.game_id || r.event_id,
+      homeTeam: r.home_team,
+      awayTeam: r.away_team,
+      country: r.country || '',
+      leagueName: r.league_name || '',
+      league: r.league || '',
+      leagueId: r.league_id ?? null,
+      homeCanonical: r.home_team,
+      awayCanonical: r.away_team,
+      kickoff: new Date(Number(r.kickoff_ms) || Date.now()),
+      date: r.date || '',
+      time: r.time || '',
+      hasPreferred: !!r.has_preferred,
+    }));
+  } catch {
+    return [];
+  }
+}
+
 let priceAborted = false;
 /** Cancel an in-progress full-slate pricing run. */
 export function cancelPricing() { priceAborted = true; }
@@ -92,19 +124,36 @@ export function cancelPricing() { priceAborted = true; }
  */
 export async function priceAllUpcoming(opts?: {
   region?: 'ng' | 'gh' | 'ke' | 'ug' | 'tz' | 'zm';
+  fallback?: SbFixture[];   // e.g. the currently-scanned Preferred fixtures
   onProgress?: (msg: string, done: number, total: number) => void;
 }): Promise<number> {
   priceAborted = false;
   const region = opts?.region ?? 'ng';
-  const state = getFixtureState();
+
+  // Source the slate robustly:
+  //   1) in-memory shared store (a Markets/Scout pull this session), else
+  //   2) the persisted upcoming_fixtures table (survives restarts / other tabs), else
+  //   3) a caller-provided fallback (the currently-scanned Preferred fixtures).
+  let slate: SbFixture[] = getFixtureState().fixtures;
+  if (slate.length === 0) {
+    slate = await loadUpcomingFromDb();
+  }
+  if (slate.length === 0 && opts?.fallback && opts.fallback.length > 0) {
+    slate = opts.fallback;
+  }
+
   // Prioritize: tracked leagues (leagueId set) first, then soonest kickoff.
-  const slate: SbFixture[] = [...state.fixtures].sort((a, b) => {
+  slate = [...slate].sort((a, b) => {
     const al = a.leagueId ? 0 : 1, bl = b.leagueId ? 0 : 1;
     if (al !== bl) return al - bl;
     return a.kickoff.getTime() - b.kickoff.getTime();
   });
 
   const total = slate.length;
+  if (total === 0) {
+    opts?.onProgress?.('No fixtures to price — pull fixtures in Markets first, or scan Preferred.', 0, 0);
+    return 0;
+  }
   let done = 0, priced = 0;
   for (const fx of slate) {
     if (priceAborted) break;

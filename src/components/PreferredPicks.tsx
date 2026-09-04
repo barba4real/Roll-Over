@@ -84,9 +84,19 @@ export default function PreferredPicks({ onImport }: Props) {
   async function priceAll() {
     if (pricing) { cancelPricing(); return; }
     setPricing(true);
-    setPriceMsg('Starting full-slate pricing…');
+    setPriceMsg('Starting pricing…');
     try {
-      await priceAllUpcoming({ region: 'ng', onProgress: (m) => setPriceMsg(m) });
+      // Fallback slate: the fixtures currently scanned in this tab, so the button
+      // works even without a separate Markets pull. Mapped ConfirmedFixture -> the
+      // minimal SbFixture shape priceAllUpcoming needs (per-event fetch keys off eventId).
+      const fallback = fixtures.map(f => ({
+        eventId: f.eventId, gameId: f.gameId, homeTeam: f.homeTeam, awayTeam: f.awayTeam,
+        country: '', leagueName: f.leagueName, league: f.league, leagueId: null,
+        homeCanonical: f.homeTeam, awayCanonical: f.awayTeam,
+        kickoff: f.kickoff, date: f.date, time: f.time, hasPreferred: true,
+      }));
+      const n = await priceAllUpcoming({ region: 'ng', fallback, onProgress: (m) => setPriceMsg(m) });
+      if (n === 0) setPriceMsg('No fixtures to price — pull fixtures in Markets, or scan Preferred first.');
     } catch (e: any) {
       setPriceMsg(`Pricing failed: ${e?.message || 'unknown'}`);
     } finally {
