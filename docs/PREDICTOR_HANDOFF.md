@@ -212,10 +212,11 @@ Input method: read from a text file (`--fixtures fixtures.txt`) **and/or** stdin
 
 ### Source selection
 
-Default to **4A (`sb_fixture_cache`)** when the table exists and is fresh; otherwise use **4B
-(paste)**. Expose a `--source {auto,db,paste}` flag (default `auto`) so the owner can force either.
-In `auto`, if the DB source is chosen, still allow `--fixtures` to *supplement* the DB list (union,
-de-duplicated by team+date) so a fixture missing from the last pull can be added by paste.
+Default to **4A (`upcoming_fixtures`)** when the table exists and is fresh; fall back to the
+`sb_fixture_cache` snapshot, then to **4B (paste)**. Expose a `--source {auto,db,paste}` flag
+(default `auto`) so the owner can force either. In `auto`, if the DB source is chosen, still allow
+`--fixtures` to *supplement* the DB list (union, de-duplicated by team+date) so a fixture missing
+from the last pull can be added by paste.
 
 ---
 
@@ -568,3 +569,158 @@ milestone by the owner.
 11. Open the DB **read-only** (`?mode=ro`) — the single hard rule that protects the app's data.
 12. Keep **fail-loud** resolution and the **n ≥ 5** fouls gate as guardrails, not options — this
     tool informs real money at risk; phantom predictions are the primary failure mode to prevent.
+
+---
+
+## Appendix D — Preferred / starred markets (context, not a modeling requirement)
+
+> **Status:** informational. Added after the predictor reported M0–M6 complete. This does **not**
+> change v1 scope or the offline boundary. It exists so the architect understands what
+> `has_preferred = 1` (on `upcoming_fixtures`, §4A) actually reflects, and where things could go
+> later — nothing here is required for the tool to work.
+
+### What "preferred markets" are
+
+The owner has a set of SportyBet ⭐ *favorite* markets — the bet types they specialise in. The
+Roll-Over app now mirrors that whole set (≈20 markets), grouped into sections, and surfaces them
+in a dedicated **Preferred** tab (non-fouls) plus the existing **Fouls** tab. The current set,
+with SportyBet market ids, is:
+
+| Section | Market | SportyBet id(s) |
+|---|---|---|
+| Early-Payout | 1X2 - 1UP | 60200 |
+| Early-Payout | 1X2 - 2UP | 60100 |
+| Early-Payout | Double Chance - 1UP | 60110 |
+| Combos | 1X2 & Over/Under | 37 |
+| Combos | Double Chance & Over/Under | 547 |
+| Combos | Double Chance & GG/NG | 546 |
+| Combos | Over/Under & GG/NG | 36 |
+| Combos | 1X2 & GG/NG | 35 |
+| Combos | Home Team or Over/Under 2.5 | 854 / 855 |
+| Combos | Away Team or Over/Under 2.5 | 858 / 859 |
+| Halves | Win Either Half | 50 / 51 |
+| Halves | Highest Scoring Half | 52 / 53 / 54 |
+| Halves | 1st Half - 1X2 & Over/Under | 79 |
+| Halves | 1st Half - Double Chance | 63 |
+| Halves | 1st Half - 1X2 & GG/NG | 78 |
+| Corners | Home / Away Team Total Corners | 900300 / 900301 |
+| Team Totals | Home / Away Team Over/Under | 19 / 20 |
+| Other | To Score 3+ in a Row | 60020 / 60021 / 60022 |
+| Other | 10 Minutes - 1X2 | 105 |
+| Fouls (own tab) | Home / Away / Match Fouls O/U | 900544 / 900545 / 900342 |
+
+(Correct Score and Handicap were deliberately excluded by the owner.)
+
+### What this means for the predictor — deliberately minimal
+
+1. **You are NOT required to model these markets.** v1 priority is unchanged: **Fouls first**,
+   then Poisson goals (1X2 / O/U), then corners/cards. The preferred list is the owner's *betting*
+   vocabulary on SportyBet, not a modeling mandate. Do not add combo/half/early-payout models for
+   v1.
+2. **`has_preferred` is a flag, not a market.** On `upcoming_fixtures`, `has_preferred = 1` means
+   the fixture offered *at least one* of these markets when the app pulled it. Treat it exactly as
+   §4A already says: a weak positive signal, **not** a guarantee of any specific market (and
+   specifically **not** a fouls guarantee). Safe optional use: as a minor sort key (float
+   preferred-carrying fixtures up), never as a filter that drops fixtures.
+3. **The markets you already model map onto some of these.** Where your existing outputs line up,
+   you may *optionally* label them so the owner sees the correspondence — e.g. your goals O/U
+   informs "Over/Under", your 1X2 informs "1X2 - 1UP" (the 1UP is just an early-payout wrapper on
+   the same 1X2 outcome). This is presentation only; the underlying probability is the same.
+4. **Corners** — you already model corners (§6.3). The preferred "Home/Away Team Total Corners"
+   (ids 900300/900301) map directly to your per-team corner rolling averages. If corner coverage
+   in the DB is reasonable, surfacing a per-team corners O/U line is a natural, low-cost add — but
+   still stretch, not v1.
+
+### If the owner ever wants preferred-market modeling (future, not now)
+
+Only relevant if promoted to a milestone later. The combos (1X2 & O/U, DC & GG/NG, etc.) are
+**products of marginals you may already estimate** — e.g. P(1X2 & Over 2.5) can be approximated
+from your 1X2 model × your goals O/U model under an independence assumption (crude but a starting
+point). Halves markets need a half-time goals model (you have `ht_home_goals`/`ht_away_goals` in
+`historical_matches` to build it). None of this is needed for v1; it's here so the path is known.
+
+**Bottom line:** keep building fouls + goals as specified. The preferred-market list is context so
+you interpret `has_preferred` correctly and know where optional presentation labels or future
+models could hook in — it adds **no** v1 obligation.
+
+---
+
+## Appendix E — Responses to the architect's post-M0–M6 integration flags
+
+> The architect completed M0–M6 and raised three integration observations plus the stretch
+> backlog. Owner responses below. These are **advisory** — none block current use.
+
+### E1 — Fouls is data-starved (2.2%); D2 backfill is the highest-leverage next step
+
+Correct, and acknowledged. **The owner has explicitly deferred D2 (fouls backfill) and does not
+want it pursued right now.** Keep the model exactly as built: honest, low-confidence baseline
+lines with visible `n` and the D1 shrinkage. Do **not** attempt to backfill fouls from inside the
+predictor — that would require network scraping and breaks the offline boundary (§4 / D4). If foul
+coverage ever improves, it will happen on the **Roll-Over app side** (its enrichment pipeline
+writes `historical_matches`), and your model will benefit automatically with **no predictor
+change** — which is the whole point of the design being "ready to exploit it the moment the data
+improves." Leave the hook; don't build the importer.
+
+### E2 — Entity-splitting across sources (e.g. active "Man United" vs sparse StatsBomb "Manchester United")
+
+Good catch, and the match-count weighting you built is the right instinct. Guidance:
+
+- **Keep match-count weighting** as the primary defence — a spelling with more rows should
+  dominate a sparse duplicate of the same club.
+- **Grow `aliases.json` toward the DB's *active* spellings.** The seed maps variants → a canonical
+  name; make sure the canonical you resolve to is the spelling that actually carries the most rows
+  in *this* DB, not a "textbook" name. When you hit a split, add both raw spellings as aliases
+  pointing at the row-richest canonical.
+- **Optional consolidation view:** a `--resolve-only`-style report (Appendix C.1) that lists, per
+  canonical, which raw DB spellings collapsed into it and their row counts, would make splits
+  visible so the owner/you can triage them into `aliases.json`. Stretch, not required.
+
+The owner is fine with this staying a "sharpen aliases as you go" process rather than an automated
+entity-resolution layer.
+
+### E3 — SportyBet league string ("Spain: LaLiga") doesn't map to DB `league_id` slugs (e.g. `esp-la-liga`)
+
+Confirmed real gap, and it's the one concrete cross-side refinement worth noting. Context:
+
+- `upcoming_fixtures.league` is SportyBet's display string (`"Spain: LaLiga"`,
+  `"England: Premier League"`); `historical_matches.league_id` is a slug (`esp-la-liga`,
+  `eng-premier-league`, per the D4 table).
+- For **league-scoped resolution on DB fixtures** (D4 rule 2 — filter the candidate set by
+  `league_id` before fuzzy matching), you need to map the SportyBet string → the slug.
+
+Recommended handling, in order of effort:
+
+1. **v1 (no new work):** DB-sourced fixtures can skip league-scoping and rely on the
+   name-present-in-DB restriction (D4 rule 1) + fuzzy ≥ 88 + fail-loud. This already works; league
+   scoping is an accuracy *booster*, not a requirement.
+2. **Cheap improvement (predictor-side):** keep a small `league_map.json` you own —
+   `{"spain: laliga": "esp-la-liga", "england: premier league": "eng-premier-league", ...}` —
+   covering the ~15 clean D4 leagues. Normalize the SportyBet string (lowercase, trim) and look it
+   up; when present, scope the candidate set by that `league_id`. Unmapped → fall back to rule 1.
+   The D4 table gives you the exact target slugs to seed this with.
+3. **If the owner wants it made robust later (app-side, optional):** the Roll-Over app could write
+   the resolved `league_id` directly onto `upcoming_fixtures` (it already knows its own registry
+   slugs). That would hand you the slug with no mapping needed. **Not committed** — flag it to the
+   owner if E3 becomes a real accuracy limiter in practice.
+
+Owner's call: **go with option 2** (predictor owns a small `league_map.json` seeded from the D4
+slugs). Option 3 stays on the shelf unless the mapping proves too noisy to maintain by hand.
+
+### E4 — Remaining stretch backlog (Dixon-Coles, recency weighting, backfill importer, Streamlit, backtest)
+
+All confirmed **stretch, post-v1**, none blocking:
+
+- **Dixon-Coles / recency weighting** — welcome upgrades to the goals model whenever you want;
+  Poisson-first was always the plan.
+- **Fouls backfill importer** — **deferred / do not build** (see E1; offline boundary).
+- **Streamlit dashboard** — nice-to-have; CLI + CSV is sufficient for now.
+- **Backtest against `slip_selections`** — blocked by data, not design: the table is still
+  **empty** (no staked slips yet). Revisit once the owner has staked real slips; then it becomes a
+  genuine accuracy check. Read-only always.
+
+### Verdict
+
+**This is a good place to pause.** The tool is usable now (`python predict.py --source db` against
+a fresh pull, or `--fixtures` with a paste), the priority market is modeled honestly, and every
+remaining item is either deferred by the owner (D2/backfill) or a clearly-optional enhancement.
+Pick up E2/E3 sharpening opportunistically; hold the rest until the owner promotes one.
