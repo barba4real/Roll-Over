@@ -93,9 +93,10 @@ export interface PreferredMarketRow {
   marketLabel: string;             // e.g. "Home Team Fouls O/U"
   line: string;                    // e.g. "Under 13.5" (full outcome desc)
   odds: number;
-  locked: boolean;                 // market suspended (status!=0) or outcome !isActive.
-                                   // Fouls unlock a few hours pre-kickoff, so we still
-                                   // list them locked to pre-stage the pick.
+  locked: boolean;                 // outcome not active / not priced (decided per
+                                   // outcome, NOT from m.status). Fouls that are not
+                                   // yet open are still listed so the pick can be
+                                   // pre-staged before they unlock.
 }
 
 export interface PreferredFixture {
@@ -527,13 +528,15 @@ export async function fetchFixtureMarkets(
     const cls = classifyPreferred(m);
     if (!cls) continue;
     const surfaceLocked = cls.surfaceWhenLocked;
-    const marketLocked = !!(m.status && m.status !== 0);
-    if (marketLocked && !surfaceLocked) continue;
+    // NOTE: m.status is NOT a lock flag. Live data shows the SAME market id
+    // appearing under status 0 AND status 1, each carrying a different (main vs
+    // alternative) line, both with active, priced outcomes. So locking must be
+    // decided PER OUTCOME from isActive + a valid price — never from m.status.
     for (const oc of m.outcomes || []) {
       const active = !!oc.isActive;
       const odds = parseFloat(oc.odds);
       const hasPrice = isFinite(odds) && odds >= 1.01;
-      const locked = marketLocked || !active || !hasPrice;
+      const locked = !active || !hasPrice;
       if (!surfaceLocked && locked) continue;
       if (surfaceLocked && !oc.desc) continue;
       rows.push({
@@ -558,6 +561,93 @@ export async function fetchFixtureMarkets(
     time: fx.time,
     markets: rows,
   };
+}
+
+// ─── Fouls-only confirmation (for the dedicated Fouls tab) ───────────────────
+
+// The three fouls market ids we watch (home / away / match-total).
+export const FOULS_MARKET_IDS = ['900544', '900545', '900342'];
+
+export interface FoulsFixture {
+  eventId: string;
+  homeTeam: string;
+  awayTeam: string;
+  league: string;                  // "Country: League"
+  leagueName: string;
+  kickoff: Date;
+  date: string;
+  time: string;
+  fouls: PreferredMarketRow[];     // only fouls rows (home/away/match O/U lines)
+  anyOpen: boolean;                // at least one fouls outcome is live + priced
+}
+
+/**
+ * Confirm which SportyBet fixtures actually OFFER fouls markets, and return
+ * their live fouls lines/odds. This hits the per-event endpoint for each
+ * candidate (fast — ~sub-second per event), so it is CAPPED and kickoff-sorted.
+ *
+ * Used only by the dedicated Fouls tab. It is intentionally separate from the
+ * shared Scout/Markets store: the Fouls tab is a focused watchlist of games we
+ * can actually play fouls on.
+ */
+export async function confirmFoulsFixtures(opts?: {
+  region?: SportyRegion;
+  window?: TimeWindow;
+  maxPages?: number;
+  pageSize?: number;
+  cap?: number;                    // max fixtures to per-event confirm (default 40)
+  onProgress?: (msg: string) => void;
+}): Promise<FoulsFixture[]> {
+  const region = opts?.region ?? 'ng';
+  const cap = opts?.cap ?? 40;
+  opts?.onProgress?.('Loading SportyBet fixtures…');
+
+  const { fixtures } = await fetchSportyBetFixtures({
+    region,
+    maxPages: opts?.maxPages ?? 12,
+    pageSize: opts?.pageSize ?? 30,
+    window: opts?.window ?? '',
+    onProgress: opts?.onProgress,
+  });
+
+  // Candidates first: prefer fixtures the list already flags as carrying a
+  // preferred market, then fall back to all — sorted by soonest kickoff so the
+  // capped set is the most relevant.
+  const sorted = [...fixtures].sort((a, b) => a.kickoff.getTime() - b.kickoff.getTime());
+  const preferredFirst = [
+    ...sorted.filter(f => f.hasPreferred),
+    ...sorted.filter(f => !f.hasPreferred),
+  ];
+  const candidates = preferredFirst.slice(0, cap);
+
+  const out: FoulsFixture[] = [];
+  let done = 0;
+  for (const fx of candidates) {
+    done++;
+    opts?.onProgress?.(`Checking fouls markets ${done}/${candidates.length}…`);
+    let pf: PreferredFixture;
+    try {
+      pf = await fetchFixtureMarkets(fx, { region });
+    } catch {
+      continue;
+    }
+    const fouls = pf.markets.filter(r => r.key === 'home_fouls' || r.key === 'away_fouls');
+    if (fouls.length === 0) continue; // this fixture doesn't carry fouls — skip
+    out.push({
+      eventId: fx.eventId,
+      homeTeam: fx.homeTeam,
+      awayTeam: fx.awayTeam,
+      league: fx.league,
+      leagueName: fx.leagueName,
+      kickoff: fx.kickoff,
+      date: fx.date,
+      time: fx.time,
+      fouls,
+      anyOpen: fouls.some(r => !r.locked),
+    });
+  }
+  opts?.onProgress?.(`Found ${out.length} fixture(s) offering fouls.`);
+  return out;
 }
 
 /**

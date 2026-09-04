@@ -12,7 +12,7 @@
 import React, { useState } from 'react';
 import { fetchDayFixtures, FlashscoreFixture } from '../engine/flashscore';
 import { fetchMatchEnrichment, getCachedEnrichment } from '../engine/match-enrichment';
-import { fetchSportyBetFixtures, TimeWindow, TIME_WINDOWS } from '../engine/sportybet';
+import { confirmFoulsFixtures, FoulsFixture, TimeWindow, TIME_WINDOWS } from '../engine/sportybet';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -49,40 +49,44 @@ export default function FoulsStrategy() {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<string>('');
   const [fixtures, setFixtures] = useState<FlashscoreFixture[]>([]);
+  const [foulsFixtures, setFoulsFixtures] = useState<FoulsFixture[]>([]);
   const [suggestions, setSuggestions] = useState<FoulsPickSuggestion[]>([]);
   const [teamProfiles, setTeamProfiles] = useState<Map<string, TeamFoulsProfile>>(new Map());
   const [win, setWin] = useState<TimeWindow>('');
+  const [cap, setCap] = useState(40);
   const [targetLine, setTargetLine] = useState(13.5);
 
   async function scanForPicks() {
     setLoading(true);
     setSuggestions([]);
     setTeamProfiles(new Map());
-    setStatus('Loading SportyBet fixtures that offer fouls…');
+    setFoulsFixtures([]);
+    setStatus('Confirming which SportyBet fixtures actually offer fouls…');
 
     try {
-      // Step 1: FIXTURES from SportyBet — only games that offer a fouls market,
-      // so every pick we suggest is actually bettable on the book we play.
-      const { fixtures: sbFixtures } = await fetchSportyBetFixtures({
-        region: 'ng', maxPages: 10, pageSize: 30, window: win,
+      // Step 1: DEDICATED FOULS SEARCH — per-event confirm which SportyBet
+      // fixtures actually carry a fouls market, and grab their LIVE lines/odds.
+      // This is the fouls watchlist: only games we can genuinely play fouls on.
+      const confirmed = await confirmFoulsFixtures({
+        region: 'ng', window: win, maxPages: 10, cap,
         onProgress: (m) => setStatus(m),
       });
-      // Map to the FlashscoreFixture shape the downstream analysis expects.
-      const allFixtures: FlashscoreFixture[] = sbFixtures
-        .filter(f => f.hasPreferred) // offers at least one preferred market (incl. fouls)
-        .map(f => ({
-          matchId: f.eventId,
-          homeTeam: f.homeTeam,
-          awayTeam: f.awayTeam,
-          time: f.time,
-          country: f.country,
-          league: f.leagueName,
-          score: null,
-          isFinished: false,
-          date: f.date,
-        }));
+      setFoulsFixtures(confirmed);
+
+      // Map to the FlashscoreFixture shape the downstream history analysis expects.
+      const allFixtures: FlashscoreFixture[] = confirmed.map(f => ({
+        matchId: f.eventId,
+        homeTeam: f.homeTeam,
+        awayTeam: f.awayTeam,
+        time: f.time,
+        country: '',
+        league: f.league, // already "Country: League"
+        score: null,
+        isFinished: false,
+        date: f.date,
+      }));
       setFixtures(allFixtures);
-      setStatus(`Found ${allFixtures.length} SportyBet fixture(s). Fetching foul history from Flashscore…`);
+      setStatus(`${confirmed.length} fixture(s) offer fouls. Fetching foul history from Flashscore…`);
 
       // Step 2: For each team, fetch their recent match stats to get foul averages
       // We look at the last 5-7 finished matches per team
@@ -148,7 +152,7 @@ export default function FoulsStrategy() {
               homeTeam: fixture.homeTeam,
               awayTeam: fixture.awayTeam,
               kickoff: `${fixture.date} ${fixture.time}`,
-              league: `${fixture.country}: ${fixture.league}`,
+              league: `${fixture.league}`,
               target: 'home',
               line: targetLine,
               direction: 'under',
@@ -169,7 +173,7 @@ export default function FoulsStrategy() {
               homeTeam: fixture.homeTeam,
               awayTeam: fixture.awayTeam,
               kickoff: `${fixture.date} ${fixture.time}`,
-              league: `${fixture.country}: ${fixture.league}`,
+              league: `${fixture.league}`,
               target: 'away',
               line: targetLine,
               direction: 'under',
@@ -236,11 +240,13 @@ export default function FoulsStrategy() {
     <div>
       <h2 className="text-lg font-bold mb-4 text-blue-400">Fouls Strategy</h2>
       <p className="text-xs text-gray-500 mb-4">
-        Scans upcoming fixtures and analyzes team foul patterns from Flashscore to find profitable Under/Over Fouls picks.
+        Dedicated fouls watchlist. Confirms which SportyBet fixtures actually offer a fouls
+        market (per-event check) and shows their live lines/odds, then layers Flashscore foul
+        history on top to grade Under/Over picks.
       </p>
 
       {/* Controls */}
-      <div className="flex items-center gap-4 mb-4 p-3 bg-gray-800 rounded-lg border border-gray-700">
+      <div className="flex items-center gap-4 mb-4 p-3 bg-gray-800 rounded-lg border border-gray-700 flex-wrap">
         <div className="flex items-center gap-2">
           <span className="text-xs text-gray-400">Window:</span>
           <select
@@ -252,17 +258,29 @@ export default function FoulsStrategy() {
           </select>
         </div>
         <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-400">Check up to:</span>
+          <select
+            value={cap}
+            onChange={(e) => setCap(parseInt(e.target.value))}
+            className="px-2 py-1 bg-gray-900 border border-gray-600 rounded text-xs text-gray-300"
+            title="How many nearest-kickoff fixtures to per-event confirm for fouls"
+          >
+            <option value="20">20 fixtures</option>
+            <option value="40">40 fixtures</option>
+            <option value="80">80 fixtures</option>
+            <option value="150">150 fixtures</option>
+          </select>
+        </div>
+        <div className="flex items-center gap-2">
           <span className="text-xs text-gray-400">Target line:</span>
           <select
             value={targetLine}
             onChange={(e) => setTargetLine(parseFloat(e.target.value))}
             className="px-2 py-1 bg-gray-900 border border-gray-600 rounded text-xs text-gray-300"
           >
-            <option value="11.5">11.5</option>
-            <option value="12.5">12.5</option>
-            <option value="13.5">13.5</option>
-            <option value="14.5">14.5</option>
-            <option value="15.5">15.5</option>
+            {[9.5, 10.5, 11.5, 12.5, 13.5, 14.5, 15.5, 16.5, 17.5, 18.5, 19.5, 20.5, 21.5, 22.5].map(l => (
+              <option key={l} value={l}>{l}</option>
+            ))}
           </select>
         </div>
         <button
@@ -274,6 +292,47 @@ export default function FoulsStrategy() {
         </button>
         {status && <span className="text-[10px] text-gray-500">{status}</span>}
       </div>
+
+      {/* Confirmed fouls fixtures — the live SportyBet watchlist */}
+      {foulsFixtures.length > 0 && (
+        <div className="mb-6">
+          <h3 className="text-sm font-bold text-amber-400 mb-2">
+            SportyBet Fouls Markets ({foulsFixtures.length})
+          </h3>
+          <div className="space-y-2">
+            {foulsFixtures.map((fx) => (
+              <div key={fx.eventId} className="p-3 rounded-lg border border-gray-700 bg-gray-800/60">
+                <div className="flex items-center justify-between mb-1">
+                  <div>
+                    <span className="text-sm text-gray-200 font-medium">{fx.homeTeam} v {fx.awayTeam}</span>
+                    <span className="ml-2 text-[10px] text-gray-500">{fx.date} {fx.time}</span>
+                    <span className="ml-2 text-[10px] text-gray-600">{fx.league}</span>
+                  </div>
+                  {!fx.anyOpen && (
+                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-400" title="No open fouls line yet — pre-stage; unlocks nearer kickoff">🔒 pre-stage</span>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {fx.fouls.map((row, ri) => (
+                    <span
+                      key={ri}
+                      className={`text-[10px] px-1.5 py-0.5 rounded border ${
+                        row.locked
+                          ? 'border-gray-700 bg-gray-800 text-gray-500'
+                          : 'border-amber-800 bg-amber-900/30 text-amber-300'
+                      }`}
+                      title={row.marketLabel}
+                    >
+                      {row.marketLabel.replace(' Fouls O/U', '').replace('Match Fouls O/U', 'Match')}: {row.line}
+                      {row.locked ? ' 🔒' : ` @ ${row.odds}`}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Suggestions */}
       {suggestions.length > 0 && (
